@@ -1,0 +1,100 @@
+plugins {
+    id "java-library"
+}
+
+version = "0.1.0"
+
+base {
+    archivesName = "ConnectPlus"
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = "UTF-8"
+    options.release = 17
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        name = "viaversion"
+        url = "https://repo.viaversion.com"
+        content {
+            includeGroupByRegex "com\\.viaversion(\\..+)?"
+            includeGroupByRegex "net\\.raphimc(\\..+)?"
+        }
+    }
+    maven {
+        name = "lenni0451"
+        url = "https://maven.lenni0451.net/everything"
+        content {
+            includeGroupByRegex "net\\.lenni0451(\\..+)?"
+            includeGroupByRegex "net\\.raphimc(\\..+)?"
+        }
+    }
+    maven {
+        name = "minecraftLibraries"
+        url = "https://libraries.minecraft.net"
+        content {
+            includeGroup "com.mojang"
+        }
+    }
+    maven {
+        name = "jitpack"
+        url = "https://jitpack.io"
+        content {
+            includeGroupByRegex "com\\.github\\..+"
+        }
+    }
+}
+
+dependencies {
+    compileOnly "net.raphimc:ViaProxy:3.4.13"
+
+    testImplementation platform("org.junit:junit-bom:5.11.4")
+    testImplementation "org.junit.jupiter:junit-jupiter"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+    testImplementation "net.raphimc.netminecraft:all:3.1.7"
+    testImplementation "io.netty:netty-all:4.2.18.Final"
+    testImplementation "com.google.code.gson:gson:2.14.0"
+    testImplementation "net.raphimc:ViaProxy:3.4.13"
+}
+
+test {
+    useJUnitPlatform()
+}
+
+jar {
+    archiveBaseName = "ConnectPlus"
+}
+
+def runDir = layout.projectDirectory.dir("run")
+
+tasks.register("runViaProxy", JavaExec) {
+    group = "viaproxy"
+    description = "Runs a local ViaProxy jar (run/viaproxy.jar) with this plugin installed for manual testing."
+    dependsOn jar
+    mainClass = "net.raphimc.viaproxy.ViaProxy"
+    classpath = files(runDir.file("viaproxy.jar"))
+    workingDir = runDir
+    jvmArgs "-DskipUpdateCheck"
+    doFirst {
+        def pluginsDir = runDir.dir("plugins").asFile
+        pluginsDir.mkdirs()
+        copy {
+            from jar.archiveFile
+            into pluginsDir
+        }
+    }
+}
+
+tasks.register("verifyRun", JavaExec) {
+    group = "viaproxy"
+    description = "Manual verification client driving a real ViaProxy through the lobby flow."
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = "dev.connectplus.verify.VerifyClient"
+}

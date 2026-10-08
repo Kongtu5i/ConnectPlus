@@ -1,0 +1,38 @@
+run/
+.gradle/
+build/
+.idea/
+*.iml
+.ref/
+.superpowers/
+logs/
+accounts.json
+viaproxy.yml
+viaproxy_attributes.json
+run-backend/
+
+run-vanilla/
+.worktrees/
+
+# Local host/runtime files and downloaded Minecraft assets
+/run-*/
+/libraries/
+/net/
+/versions/
+/plugins/
+/ViaLoader/
+/cache/
+
+# Local credentials and environment overrides
+secret.key
+*.pem
+.env
+.env.*
+!.env.example
+
+# Python verification helpers
+__pycache__/
+*.pyc
+
+# Plugin metadata is source, not a local host configuration.
+!/src/main/resources/viaproxy.yml

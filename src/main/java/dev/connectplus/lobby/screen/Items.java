@@ -1,0 +1,31 @@
+package dev.connectplus.lobby.screen;
+
+/**
+ * Derived from MiniConnect's Items (MIT, Copyright (c) 2024 Lenni0451).
+ * Modified in this repo: the BEDROCK constant is removed (bedrock is not used by ConnectPlus screens).
+ */
+public class Items {
+
+    public static final String OAK_DOOR = "oak_door";
+    public static final String BARRIER = "barrier";
+    public static final String COMPASS = "compass";
+    public static final String ANVIL = "anvil";
+    public static final String BOOK = "book";
+    public static final String PAPER = "paper";
+    public static final String WRITTEN_BOOK = "written_book";
+    public static final String WRITABLE_BOOK = "writable_book";
+    public static final String NAMETAG = "name_tag";
+    public static final String ARROW = "arrow";
+    public static final String CRAFTING_TABLE = "crafting_table";
+    public static final String FURNACE = "furnace";
+    public static final String DIRT = "dirt";
+    public static final String GRAY_STAINED_GLASS_PANE = "gray_stained_glass_pane";
+    public static final String TRIAL_KEY = "trial_key";
+    public static final String ENDER_PEARL = "ender_pearl";
+    public static final String ENDER_CHEST = "ender_chest";
+    public static final String LEVER = "lever";
+    public static final String TNT = "tnt";
+    public static final String REDSTONE_TORCH = "redstone_torch";
+    public static final String CHAIN = "chain";
+
+}

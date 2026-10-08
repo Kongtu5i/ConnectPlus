@@ -1,0 +1,11 @@
+* text=auto
+
+# Keep Unix launchers usable after a Windows checkout.
+gradlew text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+
+# Binary resources and the Gradle Wrapper must remain byte-for-byte intact.
+*.jar binary
+*.nbt binary
+*.png binary
