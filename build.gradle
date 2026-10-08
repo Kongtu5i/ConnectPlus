@@ -2,7 +2,7 @@ plugins {
     id "java-library"
 }
 
-version = "0.1.0"
+version = "1.0.0"
 
 base {
     archivesName = "ConnectPlus"
@@ -70,6 +70,15 @@ test {
 
 jar {
     archiveBaseName = "ConnectPlus"
+    manifest {
+        attributes(
+                "Implementation-Title": "ConnectPlus",
+                "Implementation-Version": project.version
+        )
+    }
+    from(files("LICENSE", "THIRD_PARTY_NOTICES.md")) {
+        into "META-INF"
+    }
 }
 
 def runDir = layout.projectDirectory.dir("run")

@@ -10,7 +10,7 @@ ConnectPlus 是 [ViaProxy](https://github.com/ViaVersion/ViaProxy) 的插件。�
 
 同一台代理可以供多名玩家使用，每个人分别选择自己的目标服务器。安装官方 Geyser-ViaProxy 和独立的 ConnectPlus-GeyserBridge 扩展后，基岩版玩家也可以使用大厅，并将基岩账号关联到自己的 Java 档案。
 
-本文面向玩家与部署管理员，按当前 **ConnectPlus 0.1.0** 的实现编写。文中的端口是部署示例，实际连接地址以管理员的配置为准。
+本文面向玩家与部署管理员，按 **ConnectPlus 1.0.0（预发布）** 的实现编写。文中的端口是部署示例，实际连接地址以管理员的配置为准。
 
 **已有代理入口的玩家**可以直接阅读[玩家使用指南](#玩家使用指南)：连接管理员提供的地址 → 在菜单里设置目标地址 → 按需登录微软账号 → 点击连接。换服时输入 `/dc` 回大厅，再选另一台服务器。
 
@@ -55,7 +55,7 @@ ConnectPlus 是 [ViaProxy](https://github.com/ViaVersion/ViaProxy) 的插件。�
 
 | 组件 | 当前要求 |
 | --- | --- |
-| ConnectPlus | 当前版本为 `0.1.0` |
+| ConnectPlus | 当前版本为 `1.0.0`（预发布） |
 | Java 运行环境 | 仅 Java 入口使用 ConnectPlus 至少需要 Java 17；安装基岩桥接需要 Java 21 或更高版本。统一部署可使用 Java 21，并同时满足宿主自身要求 |
 | ViaProxy | 使用未修改的官方版本，插件最低要求 `3.4.13`；基岩桥接支持 `3.4.x` 系列且不低于 `3.4.13` |
 | Geyser-ViaProxy（基岩接入时） | 使用未修改的官方 `2.11.x`，最低 `2.11.3` |

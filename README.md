@@ -10,7 +10,7 @@ ConnectPlus is a [ViaProxy](https://github.com/ViaVersion/ViaProxy) plugin. Its 
 
 Multiple players can share one proxy while choosing their own destination servers. With official Geyser-ViaProxy and the separate ConnectPlus-GeyserBridge extension installed, Bedrock players can also use the lobby and link their Bedrock account to their Java profile.
 
-This guide is for players and proxy administrators and describes the current **ConnectPlus 0.1.0** implementation. The ports shown are deployment examples; use the addresses and ports configured by your administrator.
+This guide is for players and proxy administrators and describes **ConnectPlus 1.0.0 (pre-release)**. The ports shown are deployment examples; use the addresses and ports configured by your administrator.
 
 **Players who already have a proxy address** can jump to the [player guide](#player-guide): connect to the address provided by your administrator → set a destination address in the menu → sign in with Microsoft if needed → connect. To change servers, use `/dc` to return to the lobby, then choose another server.
 
@@ -55,7 +55,7 @@ ConnectPlus is suited to a shared connection entry point for yourself, friends, 
 
 | Component | Current requirement |
 | --- | --- |
-| ConnectPlus | Current version: `0.1.0` |
+| ConnectPlus | Current version: `1.0.0` (pre-release) |
 | Java runtime | ConnectPlus with only a Java entry point requires at least Java 17; the Bedrock bridge requires Java 21 or later. Java 21 can be used for a combined deployment, while also meeting the hosts' own requirements |
 | ViaProxy | Use an unmodified official build. The plugin requires at least `3.4.13`; the Bedrock bridge supports the `3.4.x` series from `3.4.13` onward |
 | Geyser-ViaProxy, for Bedrock access | Use an unmodified official `2.11.x` build, at least `2.11.3` |
