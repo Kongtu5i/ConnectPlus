@@ -130,6 +130,88 @@ class CpAccountsTest {
     }
 
     @Test
+    void restoreOfExpiredTokenAttemptsRefreshInsteadOfReturningExpiredAccount() {
+        final JavaAuthManager manager = JavaAuthManager.create(MinecraftAuth.createHttpClient())
+                .login(new MsaToken(0, "test-only-access", null));
+        manager.getMinecraftToken().set(new MinecraftToken(0, "Bearer", "expired"));
+        manager.getMinecraftProfile().set(new MinecraftProfile(UUID.randomUUID(), "AccountPlayer"));
+        final RestoreResult result = CpAccounts.restore(JavaAuthManager.toJson(manager).toString());
+        assertEquals(RestoreResult.Status.REAUTH_REQUIRED, result.status());
+        assertEquals("no_refresh_token", result.reasonCode());
+        assertNull(result.account());
+    }
+
+    @Test
+    void missingRefreshTokenWithoutCachedProfileIsNotCorruptJson() {
+        final JavaAuthManager manager = JavaAuthManager.create(MinecraftAuth.createHttpClient())
+                .login(new MsaToken(0, "test-only-access", null));
+        final RestoreResult result = CpAccounts.restore(JavaAuthManager.toJson(manager).toString());
+        assertEquals(RestoreResult.Status.REAUTH_REQUIRED, result.status());
+        assertEquals("no_refresh_token", result.reasonCode());
+    }
+
+    @Test
+    void restoreRefreshesExpiredMinecraftTokenUsingTheAuthenticationChain() {
+        final var requests = new java.util.concurrent.atomic.AtomicInteger();
+        final var client = new net.lenni0451.commons.httpclient.HttpClient() {
+            @Override public HttpResponse execute(final net.lenni0451.commons.httpclient.requests.HttpRequest request) {
+                requests.incrementAndGet();
+                return new HttpResponse(url("https://api.minecraftservices.com/authentication/login_with_xbox"), 200,
+                        "{\"access_token\":\"test-only-renewed\",\"token_type\":\"Bearer\",\"expires_in\":86400}"
+                                .getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                        java.util.Map.of("Content-Type", java.util.List.of("application/json")));
+            }
+        };
+        final JavaAuthManager manager = JavaAuthManager.create(client)
+                .login(new MsaToken(Long.MAX_VALUE, "test-only-access", "test-only-refresh"));
+        manager.getJavaXstsToken().set(new net.raphimc.minecraftauth.xbl.model.XblXstsToken(
+                Long.MAX_VALUE, "test-only-xsts", "test-only-userhash"));
+        manager.getMinecraftToken().set(new MinecraftToken(0, "Bearer", "test-only-expired"));
+        manager.getMinecraftProfile().set(new MinecraftProfile(UUID.randomUUID(), "AccountPlayer"));
+        final RestoreResult result = CpAccounts.restore(JavaAuthManager.toJson(manager).toString(), client);
+        assertEquals(RestoreResult.Status.RESTORED, result.status(), result.reasonCode());
+        assertEquals(1, requests.get(), "Restoration must request a fresh token, not just parse the cache");
+        assertTrue(!result.account().isExpired());
+        assertTrue(result.account().toJson().contains("test-only-renewed"));
+    }
+
+    @Test
+    void realRestoreClassifiesAuthenticationNetworkFailureAsRetryable() {
+        final var client = new net.lenni0451.commons.httpclient.HttpClient() {
+            @Override public HttpResponse execute(final net.lenni0451.commons.httpclient.requests.HttpRequest request)
+                    throws java.io.IOException {
+                throw new java.io.IOException("synthetic timeout");
+            }
+        };
+        final JavaAuthManager manager = JavaAuthManager.create(client)
+                .login(new MsaToken(0, "test-only-access", "test-only-refresh"));
+        manager.getMinecraftToken().set(new MinecraftToken(0, "Bearer", "expired"));
+        manager.getMinecraftProfile().set(new MinecraftProfile(UUID.randomUUID(), "AccountPlayer"));
+        final RestoreResult result = CpAccounts.restore(JavaAuthManager.toJson(manager).toString(), client);
+        assertEquals(RestoreResult.Status.RETRYABLE_FAILURE, result.status());
+        assertNull(result.account());
+    }
+
+    @Test
+    void realRestoreClassifiesRejectedRefreshAsReauthorization() {
+        final var client = new net.lenni0451.commons.httpclient.HttpClient() {
+            @Override public HttpResponse execute(final net.lenni0451.commons.httpclient.requests.HttpRequest request) {
+                return new HttpResponse(url("https://login.live.com/oauth20_token.srf"), 400,
+                        "{\"error\":\"invalid_grant\",\"error_description\":\"synthetic rejection\"}"
+                                .getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                        java.util.Map.of("Content-Type", java.util.List.of("application/json")));
+            }
+        };
+        final JavaAuthManager manager = JavaAuthManager.create(client)
+                .login(new MsaToken(0, "test-only-access", "test-only-refresh"));
+        manager.getMinecraftToken().set(new MinecraftToken(0, "Bearer", "expired"));
+        manager.getMinecraftProfile().set(new MinecraftProfile(UUID.randomUUID(), "AccountPlayer"));
+        final RestoreResult result = CpAccounts.restore(JavaAuthManager.toJson(manager).toString(), client);
+        assertEquals(RestoreResult.Status.REAUTH_REQUIRED, result.status(), result.reasonCode());
+        assertEquals("refresh_rejected:invalid_grant", result.reasonCode());
+    }
+
+    @Test
     void onlyRestoredCarriesAnAccount() {
         for (final RestoreResult.Status status : RestoreResult.Status.values()) {
             if (status == RestoreResult.Status.RESTORED) {

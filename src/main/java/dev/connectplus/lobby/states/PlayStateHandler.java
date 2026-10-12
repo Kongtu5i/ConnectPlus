@@ -125,6 +125,7 @@ public class PlayStateHandler extends StateHandler {
     @Override
     public void tick() {
         this.send(new S2CKeepAlivePacket(0));
+        this.getHandler().refreshAccountIfNeeded();
     }
 
     @EventHandler

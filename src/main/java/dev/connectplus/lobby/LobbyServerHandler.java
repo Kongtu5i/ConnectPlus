@@ -87,6 +87,9 @@ public class LobbyServerHandler extends SimpleChannelInboundHandler<Packet> {
     private volatile PlayerSession session;
     private PlayerSession loadingProfileSession;
     private ScheduledFuture<?> tickTask;
+    private boolean accountRefreshInProgress;
+    private CpAccounts.RestoreResult.Status accountRestoreStatus;
+    private long nextAccountRefreshAt;
 
     public LobbyServerHandler(final Set<Channel> sessions, final SessionRegistry sessionRegistry, final TokenStore tokenStore, final PlayerStore playerStore, final IdentityLinkStore identityLinkStore, final SessionLeaseGranter leaseGranter, final SwitchInitiator switchInitiator, final ExecutorService storageExecutor, final AtomicInteger uncaughtExceptions) {
         this(sessions, sessionRegistry, tokenStore, playerStore, identityLinkStore, leaseGranter, switchInitiator, storageExecutor, uncaughtExceptions, null);
@@ -448,51 +451,136 @@ public class LobbyServerHandler extends SimpleChannelInboundHandler<Packet> {
      * refresh failure keeps the ciphertext so a later join retries.</p>
      */
     private void setupAccountRestore(final Channel channel, final PlayerSession session, final PlayerData data) {
-        //The token restore may hit the network (MicrosoftAccount refresh): keep it off
-        //the event loop; the account lands on the session via the event loop afterwards.
-        //An already-open main screen is refreshed when restoration completes.
+        this.watchAccountChanges(session);
+        if (this.storageExecutor == null || this.accountRefreshInProgress || session.loginInProgress
+                || !AccountLoginPolicy.isAllowedForSession(session)
+                || !this.canRetryAccount() || System.nanoTime() - this.nextAccountRefreshAt < 0) return;
+        final CPAccount existingAccount = session.account;
         final String accountBlob = data.accountBlob;
-        final Channel ownedChannel = channel;
-        //A player with save-login off keeps no stored login: nothing may be restored
-        if (AccountLoginPolicy.isAllowedForSession(session) && session.account == null && accountBlob != null && data.saveLoginInfo) {
-            //Capture the lease generation this restore was started under (§6): the
-            //landing re-checks it, so a stale result can never revive a dead session.
+        if (existingAccount != null ? existingAccount.isExpired() : accountBlob != null && data.saveLoginInfo) {
             final SessionLease restoreLease = session.lease;
+            this.accountRefreshInProgress = true;
             this.storageExecutor.execute(() -> {
-                if (!AccountLoginPolicy.isAllowedForSession(session) || !this.restoreLeaseCurrent(session, restoreLease)) return;
-                final String json = this.tokenStore.decrypt(accountBlob);
-                // Cancellation is not a restore failure. Do not enqueue a null
-                // result that could delete the token if policy is enabled again.
-                // Deserialization may refresh Microsoft tokens over the network.
-                if (!AccountLoginPolicy.isAllowedForSession(session) || !this.restoreLeaseCurrent(session, restoreLease)) return;
-                final CpAccounts.RestoreResult result = this.restoreAccountFromJson(json, data.uuid());
-                ownedChannel.eventLoop().execute(() -> {
-                    // A mode change, disconnect, fresh login or logout must make
-                    // this old restore result inert. The blob is never cleared
-                    // here: only an explicit logout removes stored credentials.
+                CpAccounts.RestoreResult outcome = null;
+                if (this.accountOperationCurrent(channel, session, data, existingAccount, accountBlob, restoreLease)) {
+                    outcome = existingAccount != null ? CpAccounts.refresh(existingAccount)
+                            : this.restoreAccountFromJson(this.tokenStore.decrypt(accountBlob), data.uuid());
+                }
+                final CpAccounts.RestoreResult result = outcome;
+                channel.eventLoop().execute(() -> {
+                    this.accountRefreshInProgress = false;
                     synchronized (session) {
-                        if (ownedChannel.isActive() && session.lobbyChannel == ownedChannel
-                                && AccountLoginPolicy.isAllowedForSession(session)
-                                && this.session == session && session.playerData == data
-                                && Objects.equals(data.accountBlob, accountBlob)
-                                && !session.displaced
-                                && this.restoreLeaseCurrent(session, restoreLease)) {
+                        if (result != null && this.accountOperationCurrent(channel, session, data,
+                                existingAccount, accountBlob, restoreLease)) {
+                            this.accountRestoreStatus = result.status();
                             if (result.status() == CpAccounts.RestoreResult.Status.RESTORED) {
                                 session.account = result.account();
-                                //The restored account's real profile name joins the
-                                //visit index's known names (never a lobby visit)
+                                this.watchAccountChanges(session);
+                                this.queueAccountSave(session, result.account(), data, restoreLease);
                                 this.recordKnownAccountName(result.account());
-                                if (this.handler instanceof PlayStateHandler play) play.refreshAccountDisplay();
                             } else {
+                                this.nextAccountRefreshAt = System.nanoTime() + TimeUnit.MINUTES.toNanos(1);
+                                if (result.status() == CpAccounts.RestoreResult.Status.REAUTH_REQUIRED) {
+                                    session.account = null;
+                                    this.watchAccountChanges(session);
+                                }
                                 this.logRestoreOutcome(session, result);
                             }
-                        } else if (result.status() != CpAccounts.RestoreResult.Status.RESTORED) {
-                            this.logRestoreOutcome(session, result);
+                            if (this.handler instanceof PlayStateHandler play) play.refreshAccountDisplay();
                         }
                     }
                 });
             });
         }
+    }
+
+    private boolean accountOperationCurrent(final Channel channel, final PlayerSession session, final PlayerData data,
+                                            final CPAccount account, final String blob, final SessionLease lease) {
+        return channel.isActive() && session.lobbyChannel == channel && this.session == session
+                && session.playerData == data && session.account == account && !session.loginInProgress
+                && (account != null || Objects.equals(data.accountBlob, blob)) && AccountLoginPolicy.isAllowedForSession(session)
+                && this.restoreLeaseCurrent(session, lease);
+    }
+
+    /** Cached token expiry is recoverable; only rejected/unreadable credentials need authorization. */
+    public boolean canRetryAccount() {
+        return this.accountRestoreStatus != CpAccounts.RestoreResult.Status.REAUTH_REQUIRED
+                && this.accountRestoreStatus != CpAccounts.RestoreResult.Status.CORRUPT;
+    }
+
+    public boolean isAccountRefreshing() {
+        return this.accountRefreshInProgress;
+    }
+
+    public void refreshAccountIfNeeded() {
+        final PlayerSession current = this.session;
+        if (current != null && current.playerData != null && current.lobbyChannel != null) {
+            this.setupAccountRestore(current.lobbyChannel, current, current.playerData);
+        }
+    }
+
+    public void requestAccountRefresh() {
+        this.nextAccountRefreshAt = 0;
+        this.refreshAccountIfNeeded();
+    }
+
+    /** Also observes host-driven refreshes while the client is playing on a backend. */
+    public void watchAccountChanges(final PlayerSession session) {
+        if (this.storageExecutor == null) return;
+        synchronized (session) {
+            final CPAccount account = session.account;
+            if (session.observedAccount == account && session.observedAccountData == session.playerData
+                    && session.observedAccountLease == session.lease) return;
+            if (session.accountChangeUnsubscribe != null) session.accountChangeUnsubscribe.run();
+            session.observedAccount = account;
+            session.observedAccountData = session.playerData;
+            session.observedAccountLease = session.lease;
+            session.accountChangeUnsubscribe = null;
+            if (account == null || session.playerData == null) return;
+            this.accountRestoreStatus = null;
+            this.nextAccountRefreshAt = 0;
+            final PlayerData data = session.playerData;
+            final SessionLease lease = session.lease;
+            final Runnable unsubscribe = account.onChange(() -> this.queueAccountSave(session, account, data, lease));
+            session.accountChangeUnsubscribe = unsubscribe;
+            if (session.c2pChannel != null) session.c2pChannel.closeFuture().addListener(ignored -> unsubscribe.run());
+        }
+    }
+
+    private void queueAccountSave(final PlayerSession session, final CPAccount account,
+                                  final PlayerData data, final SessionLease lease) {
+        try {
+            this.storageExecutor.execute(() -> {
+                synchronized (session) {
+                    if (!this.accountSaveCurrent(session, account, data, lease)) return;
+                    try {
+                        final String json = account.toJson();
+                        if (data.accountBlob != null && json.equals(this.tokenStore.decrypt(data.accountBlob))) return;
+                        final String encrypted = this.tokenStore.encrypt(json);
+                        if (!this.accountSaveCurrent(session, account, data, lease)) return;
+                        final String previous = data.accountBlob;
+                        data.accountBlob = encrypted;
+                        try {
+                            this.playerStore.save(data.key, data);
+                        } catch (final IOException e) {
+                            data.accountBlob = previous;
+                            throw e;
+                        }
+                    } catch (final Exception e) {
+                        LoggerFactory.getLogger("ConnectPlus").warn("Saving refreshed account of {} failed ({})",
+                                session.uuid, e.getClass().getSimpleName());
+                    }
+                }
+            });
+        } catch (final java.util.concurrent.RejectedExecutionException ignored) {
+            //Shutdown must not make a token refresh fail inside the authentication library.
+        }
+    }
+
+    private boolean accountSaveCurrent(final PlayerSession session, final CPAccount account,
+                                       final PlayerData data, final SessionLease lease) {
+        return session.account == account && session.playerData == data && data.saveLoginInfo
+                && AccountLoginPolicy.isAllowedForSession(session) && this.restoreLeaseCurrent(session, lease);
     }
 
     /**

@@ -754,13 +754,15 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
      * same rule as the disconnect wipe.
      */
     private void saveAcceptedModifications(final PlayerSession holderSession) throws IOException {
-        final PlayerData data = holderSession.playerData;
-        if (data == null) return;
-        if (!data.saveLoginInfo && data.accountBlob != null) {
-            data.accountBlob = null;
-            holderSession.account = null;
+        synchronized (holderSession) {
+            final PlayerData data = holderSession.playerData;
+            if (data == null) return;
+            if (!data.saveLoginInfo && data.accountBlob != null) {
+                data.accountBlob = null;
+                holderSession.account = null;
+            }
+            this.playerStore.save(data.key, data);
         }
-        this.playerStore.save(data.key, data);
     }
 
     private LeaseImpl grant(final PlayerSession session, final Set<String> resources) {

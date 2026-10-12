@@ -101,31 +101,33 @@ public class BookmarkDetailScreen extends Screen {
     }
 
     private void connectTo(final PlayerSession session, final ScreenHandler screenHandler) {
-        // Read live data: editing or deleting the bookmark must not leave a
-        // connection button that targets an outdated captured address/version.
-        final Bookmark bookmark = this.find(session);
-        if (bookmark == null) {
-            screenHandler.openScreen(new BookmarksScreen(this.lang, this.page));
-            return;
-        }
-        final LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
-        session.serverAddress = bookmark.address;
-        session.targetVersion = bookmark.versionName == null ? null : VersionNames.find(bookmark.versionName);
-        // A displaced session must not persist another owner's usage timestamp.
-        if (AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
-            bookmark.lastConnectedAt = System.currentTimeMillis();
-            handler.getPlayerStore().save(session.playerData);
-        }
-        final var result = ConnectFlow.start(session, screenHandler.getStateHandler(), handler.getSwitchInitiator());
-        if (dev.connectplus.switching.SwitchInitiator.StartResult.STARTED != result) {
-            final String message = Messages.Commands.connectResultMessage(this.lang, result);
-            if (message != null) {
-                for (final TextComponent component : Messages.format(message)) {
-                    screenHandler.getStateHandler().send(new S2CSystemChatPacket(component, false));
-                }
+        synchronized (session) {
+            // Read live data: editing or deleting the bookmark must not leave a
+            // connection button that targets an outdated captured address/version.
+            final Bookmark bookmark = this.find(session);
+            if (bookmark == null) {
+                screenHandler.openScreen(new BookmarksScreen(this.lang, this.page));
+                return;
             }
-            if (result != dev.connectplus.switching.SwitchInitiator.StartResult.REJECTED_UNSUPPORTED_PROTOCOL) {
-                screenHandler.openScreen(new MainScreen(this.lang));
+            final LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
+            session.serverAddress = bookmark.address;
+            session.targetVersion = bookmark.versionName == null ? null : VersionNames.find(bookmark.versionName);
+            // A displaced session must not persist another owner's usage timestamp.
+            if (AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
+                bookmark.lastConnectedAt = System.currentTimeMillis();
+                handler.getPlayerStore().save(session.playerData);
+            }
+            final var result = ConnectFlow.start(session, screenHandler.getStateHandler(), handler.getSwitchInitiator());
+            if (dev.connectplus.switching.SwitchInitiator.StartResult.STARTED != result) {
+                final String message = Messages.Commands.connectResultMessage(this.lang, result);
+                if (message != null) {
+                    for (final TextComponent component : Messages.format(message)) {
+                        screenHandler.getStateHandler().send(new S2CSystemChatPacket(component, false));
+                    }
+                }
+                if (result != dev.connectplus.switching.SwitchInitiator.StartResult.REJECTED_UNSUPPORTED_PROTOCOL) {
+                    screenHandler.openScreen(new MainScreen(this.lang));
+                }
             }
         }
     }
@@ -151,28 +153,30 @@ public class BookmarkDetailScreen extends Screen {
         sendChatLines(screenHandler, this.t(Messages.BookmarksScreen.RenameChatInfo));
         final LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
         session.chatListener = input -> {
-            final String newName = input.trim();
-            if (newName.isEmpty() || newName.equals(this.bookmarkName)) {
-                screenHandler.openScreen(this.replacement());
+            synchronized (session) {
+                final String newName = input.trim();
+                if (newName.isEmpty() || newName.equals(this.bookmarkName)) {
+                    screenHandler.openScreen(this.replacement());
+                    return true;
+                }
+                final boolean duplicate = session.playerData != null && session.playerData.bookmarks.stream()
+                        .anyMatch(bm -> bm.name.equals(newName));
+                if (duplicate) {
+                    sendChatLines(screenHandler, this.t(Messages.Commands.BmNameExists));
+                    screenHandler.openScreen(this.replacement());
+                    return true;
+                }
+                final Bookmark bookmark = this.find(session);
+                //§6 bookmark write: a displaced session's chat input must not rewrite
+                //the profile the new holder now owns.
+                if (bookmark != null && AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
+                    bookmark.name = newName;
+                    handler.getPlayerStore().save(session.playerData);
+                    sendChatLines(screenHandler, this.t(Messages.BookmarksScreen.Renamed));
+                }
+                screenHandler.openScreen(new BookmarkDetailScreen(this.lang, newName, this.page));
                 return true;
             }
-            final boolean duplicate = session.playerData != null && session.playerData.bookmarks.stream()
-                    .anyMatch(bm -> bm.name.equals(newName));
-            if (duplicate) {
-                sendChatLines(screenHandler, this.t(Messages.Commands.BmNameExists));
-                screenHandler.openScreen(this.replacement());
-                return true;
-            }
-            final Bookmark bookmark = this.find(session);
-            //§6 bookmark write: a displaced session's chat input must not rewrite
-            //the profile the new holder now owns.
-            if (bookmark != null && AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
-                bookmark.name = newName;
-                handler.getPlayerStore().save(session.playerData);
-                sendChatLines(screenHandler, this.t(Messages.BookmarksScreen.Renamed));
-            }
-            screenHandler.openScreen(new BookmarkDetailScreen(this.lang, newName, this.page));
-            return true;
         };
     }
 
@@ -181,22 +185,24 @@ public class BookmarkDetailScreen extends Screen {
         sendChatLines(screenHandler, this.t(Messages.BookmarksScreen.ChangeAddressChatInfo));
         final LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
         session.chatListener = input -> {
-            final String address = dev.connectplus.session.ServerAddress.normalize(input);
-            final Bookmark bookmark = this.find(session);
-            //§6 bookmark write: the lease-currency guard (see startRename).
-            final boolean leaseCurrent = AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter());
-            if (bookmark != null && leaseCurrent && BookmarkDetailScreen.validAddress(address)) {
-                bookmark.address = address;
-                handler.getPlayerStore().save(session.playerData);
-                sendChatLines(screenHandler, this.t(Messages.BookmarksScreen.AddressChanged));
-                screenHandler.openScreen(this.replacement());
-            } else {
-                if (bookmark != null) {
-                    sendChatLines(screenHandler, this.t(Messages.MainScreen.SetServerAddress.ChatInvalidAddress));
+            synchronized (session) {
+                final String address = dev.connectplus.session.ServerAddress.normalize(input);
+                final Bookmark bookmark = this.find(session);
+                //§6 bookmark write: the lease-currency guard (see startRename).
+                final boolean leaseCurrent = AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter());
+                if (bookmark != null && leaseCurrent && BookmarkDetailScreen.validAddress(address)) {
+                    bookmark.address = address;
+                    handler.getPlayerStore().save(session.playerData);
+                    sendChatLines(screenHandler, this.t(Messages.BookmarksScreen.AddressChanged));
+                    screenHandler.openScreen(this.replacement());
+                } else {
+                    if (bookmark != null) {
+                        sendChatLines(screenHandler, this.t(Messages.MainScreen.SetServerAddress.ChatInvalidAddress));
+                    }
+                    screenHandler.openScreen(this.replacement());
                 }
-                screenHandler.openScreen(this.replacement());
+                return true;
             }
-            return true;
         };
     }
 
@@ -205,12 +211,14 @@ public class BookmarkDetailScreen extends Screen {
             final Bookmark bookmark = this.find(session);
             return bookmark == null || bookmark.versionName == null ? null : VersionNames.find(bookmark.versionName);
         }, version -> {
-            final LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
-            final Bookmark bookmark = this.find(session);
-            //§6 bookmark write: the lease-currency guard (see startRename).
-            if (bookmark != null && AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
-                bookmark.versionName = version.getName();
-                handler.getPlayerStore().save(session.playerData);
+            synchronized (session) {
+                final LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
+                final Bookmark bookmark = this.find(session);
+                //§6 bookmark write: the lease-currency guard (see startRename).
+                if (bookmark != null && AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
+                    bookmark.versionName = version.getName();
+                    handler.getPlayerStore().save(session.playerData);
+                }
             }
         }, this::replacement));
     }

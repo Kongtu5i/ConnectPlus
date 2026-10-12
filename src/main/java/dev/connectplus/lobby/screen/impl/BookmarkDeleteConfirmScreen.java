@@ -57,16 +57,18 @@ public class BookmarkDeleteConfirmScreen extends Screen {
     }
 
     void delete(final PlayerSession session, final ScreenHandler screenHandler) {
-        final dev.connectplus.lobby.LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
-        //§6 bookmark write: a displaced session's confirmation click must not rewrite
-        //the profile the new holder now owns (the click can land during the bounded
-        //exit window).
-        if (session.playerData != null && AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
-            session.playerData.bookmarks.removeIf(bm -> bm.name.equals(this.bookmarkName));
-            handler.getPlayerStore().save(session.playerData);
+        synchronized (session) {
+            final dev.connectplus.lobby.LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
+            //§6 bookmark write: a displaced session's confirmation click must not rewrite
+            //the profile the new holder now owns (the click can land during the bounded
+            //exit window).
+            if (session.playerData != null && AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
+                session.playerData.bookmarks.removeIf(bm -> bm.name.equals(this.bookmarkName));
+                handler.getPlayerStore().save(session.playerData);
+            }
+            sendChatLines(screenHandler, Languages.text(this.lang, Messages.Commands.BmDeleted));
+            screenHandler.openScreen(new BookmarksScreen(this.lang, this.page));
         }
-        sendChatLines(screenHandler, Languages.text(this.lang, Messages.Commands.BmDeleted));
-        screenHandler.openScreen(new BookmarksScreen(this.lang, this.page));
     }
 
     private String t(final Msg msg) {

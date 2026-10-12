@@ -441,6 +441,7 @@ public final class AccountFlow {
                         //switch itself was performed inside the committed transaction;
                         //here only the chat lines are added.
                         applyLinkResult(session, result, verifiedAccount);
+                        handler.watchAccountChanges(session);
                         sendChatLines(screenHandler, Languages.text(lang, linkResultMessage(result)));
                     } catch (final Throwable t) {
                         LoggerFactory.getLogger("ConnectPlus").warn("The link flow completion failed", t);
@@ -599,22 +600,24 @@ public final class AccountFlow {
      * file the arriving same-identity holder is about to restore.</p>
      */
     public static void logout(final PlayerSession session, final ScreenHandler screenHandler, final LobbyServerHandler handler) {
-        if (!AccountLoginPolicy.isAllowedForSession(session)) {
-            sendChatLines(screenHandler, Languages.text(Lang.of(session), Messages.Commands.AccountLoginDisabled));
-            return;
+        synchronized (session) {
+            if (!AccountLoginPolicy.isAllowedForSession(session)) {
+                sendChatLines(screenHandler, Languages.text(Lang.of(session), Messages.Commands.AccountLoginDisabled));
+                return;
+            }
+            if (!leaseCurrent(session, handler.getLeaseGranter())) {
+                //The profile (and its stored credentials) belongs to the new holder now.
+                sendChatLines(screenHandler, Languages.text(Lang.of(session), Messages.MainScreen.Login.ChatLinkStale));
+                return;
+            }
+            session.account = null;
+            if (session.playerData != null) {
+                session.playerData.accountBlob = null;
+                handler.getPlayerStore().save(session.playerData);
+            }
+            final Lang lang = Lang.of(session);
+            sendChatLines(screenHandler, Languages.text(lang, Messages.MainScreen.Login.ChatLogout));
         }
-        if (!leaseCurrent(session, handler.getLeaseGranter())) {
-            //The profile (and its stored credentials) belongs to the new holder now.
-            sendChatLines(screenHandler, Languages.text(Lang.of(session), Messages.MainScreen.Login.ChatLinkStale));
-            return;
-        }
-        session.account = null;
-        if (session.playerData != null) {
-            session.playerData.accountBlob = null;
-            handler.getPlayerStore().save(session.playerData);
-        }
-        final Lang lang = Lang.of(session);
-        sendChatLines(screenHandler, Languages.text(lang, Messages.MainScreen.Login.ChatLogout));
     }
 
     /**
@@ -626,29 +629,32 @@ public final class AccountFlow {
      * not persist credentials the new holder's load will never see.
      */
     static boolean installAccount(final PlayerSession session, final CPAccount account, final LobbyServerHandler handler) {
-        if (!AccountLoginPolicy.isAllowedForSession(session)) return false;
-        //The lease-currency gate: the coordinator's volatile invalidation makes a
-        //displacement that ran after the caller's ownership snapshot visible here.
-        if (!leaseCurrent(session, handler.getLeaseGranter())) return false;
-        String encrypted = null;
-        if (session.playerData.saveLoginInfo) {
-            encrypted = handler.getTokenStore().encrypt(account.toJson());
-            //A mode change while encrypting must leave no credentials behind (see the
-            //AccountFlowPolicyTest invariant)
+        synchronized (session) {
             if (!AccountLoginPolicy.isAllowedForSession(session)) return false;
-            //Re-check the currency after the (blocking) encryption: the displacement
-            //may have run meanwhile — the frozen session keeps no new credentials.
+            //The lease-currency gate: the coordinator's volatile invalidation makes a
+            //displacement that ran after the caller's ownership snapshot visible here.
             if (!leaseCurrent(session, handler.getLeaseGranter())) return false;
+            String encrypted = null;
+            if (session.playerData.saveLoginInfo) {
+                encrypted = handler.getTokenStore().encrypt(account.toJson());
+                //A mode change while encrypting must leave no credentials behind (see the
+                //AccountFlowPolicyTest invariant)
+                if (!AccountLoginPolicy.isAllowedForSession(session)) return false;
+                //Re-check the currency after the (blocking) encryption: the displacement
+                //may have run meanwhile — the frozen session keeps no new credentials.
+                if (!leaseCurrent(session, handler.getLeaseGranter())) return false;
+            }
+            session.account = account;
+            //Save-login off: the login stays valid for this session only and no
+            //account data is written anywhere
+            session.playerData.accountBlob = encrypted;
+            handler.getPlayerStore().save(session.playerData);
+            handler.watchAccountChanges(session);
+            //The account's real profile name joins the visit index's known names —
+            //never a lobby visit (learning a name is not entering the lobby)
+            handler.recordKnownAccountName(account);
+            return true;
         }
-        session.account = account;
-        //Save-login off: the login stays valid for this session only and no
-        //account data is written anywhere
-        session.playerData.accountBlob = encrypted;
-        handler.getPlayerStore().save(session.playerData);
-        //The account's real profile name joins the visit index's known names —
-        //never a lobby visit (learning a name is not entering the lobby)
-        handler.recordKnownAccountName(account);
-        return true;
     }
 
     private static void sendChatLines(final ScreenHandler screenHandler, final String message, final Object... args) {

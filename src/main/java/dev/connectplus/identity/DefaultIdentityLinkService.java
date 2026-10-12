@@ -186,6 +186,9 @@ public final class DefaultIdentityLinkService implements IdentityLinkService {
         //From here the transaction either commits (then B's lease becomes the
         //session's) or aborts (then B's lease is handed straight back).
 
+        //The old lease is now superseded. Join an already accepted credential save
+        //before transaction writes/deletes; never hold this monitor during claim waits.
+        synchronized (session) { }
         final String operationId = UUID.randomUUID().toString();
         final LinkTransactionJournal journal = this.journalFactory.get();
         // Declared outside the try so the late-failure fallback can keep the
@@ -528,6 +531,7 @@ public final class DefaultIdentityLinkService implements IdentityLinkService {
 
         final String operationId = UUID.randomUUID().toString();
         final LinkTransactionJournal journal = this.journalFactory.get();
+        synchronized (session) { } //Join in-flight credential writes after superseding B's old lease.
         try {
             // ---- Step 3: save B's completed modifications; write UNLINK PREPARED
             //B's accepted in-memory modifications reach disk before the binding is
@@ -777,15 +781,17 @@ public final class DefaultIdentityLinkService implements IdentityLinkService {
     private void finishSwitch(final PlayerSession session, final ProfileKey targetKey,
                               final PlayerData targetData, final SessionLease targetLease,
                               @Nullable final CPAccount verifiedAccount) {
-        session.playerData = targetData;
-        session.profileKey = targetKey;
-        session.account = AccountLoginPolicy.isAllowedForSession(session) && this.coordinator.isCurrent(targetLease)
-                ? verifiedAccount : null;
-        session.generation = targetLease.generation();
-        final SessionLease oldLease = session.lease;
-        session.lease = targetLease;
-        if (oldLease != null && oldLease != targetLease) {
-            this.coordinator.release(oldLease);
+        synchronized (session) {
+            session.playerData = targetData;
+            session.profileKey = targetKey;
+            session.account = AccountLoginPolicy.isAllowedForSession(session) && this.coordinator.isCurrent(targetLease)
+                    ? verifiedAccount : null;
+            session.generation = targetLease.generation();
+            final SessionLease oldLease = session.lease;
+            session.lease = targetLease;
+            if (oldLease != null && oldLease != targetLease) {
+                this.coordinator.release(oldLease);
+            }
         }
     }
 

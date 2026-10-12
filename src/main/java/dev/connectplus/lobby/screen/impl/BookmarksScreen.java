@@ -113,35 +113,37 @@ public class BookmarksScreen extends Screen {
      * new holder now owns, so the lease currency is validated before any change.
      */
     public static SaveResult saveNamed(final PlayerSession session, final LobbyServerHandler handler, final String name) {
-        if (session.serverAddress == null || name == null || name.isEmpty()) {
-            return SaveResult.NO_ADDRESS;
-        }
-        //§6 (final fix): the guard covers the displacement AND the protected-load
-        //window — a proxied session with neither lease nor data must not lazily
-        //create a wire-uuid scratch profile below (the landing would refuse it).
-        if (!AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
-            return SaveResult.REFUSED_STALE_SESSION;
-        }
-        if (session.playerData == null) {
-            session.playerData = new PlayerData(session.uuid);
-        }
-        final String versionName = session.targetVersion != null ? session.targetVersion.getName() : null;
-        final long now = System.currentTimeMillis();
-        for (final Bookmark bookmark : session.playerData.bookmarks) {
-            if (bookmark.name.equals(name)) {
-                bookmark.address = session.serverAddress;
-                bookmark.versionName = versionName;
-                bookmark.lastConnectedAt = now;
-                handler.getPlayerStore().save(session.playerData);
-                return SaveResult.SAVED;
+        synchronized (session) {
+            if (session.serverAddress == null || name == null || name.isEmpty()) {
+                return SaveResult.NO_ADDRESS;
             }
+            //§6 (final fix): the guard covers the displacement AND the protected-load
+            //window — a proxied session with neither lease nor data must not lazily
+            //create a wire-uuid scratch profile below (the landing would refuse it).
+            if (!AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
+                return SaveResult.REFUSED_STALE_SESSION;
+            }
+            if (session.playerData == null) {
+                session.playerData = new PlayerData(session.uuid);
+            }
+            final String versionName = session.targetVersion != null ? session.targetVersion.getName() : null;
+            final long now = System.currentTimeMillis();
+            for (final Bookmark bookmark : session.playerData.bookmarks) {
+                if (bookmark.name.equals(name)) {
+                    bookmark.address = session.serverAddress;
+                    bookmark.versionName = versionName;
+                    bookmark.lastConnectedAt = now;
+                    handler.getPlayerStore().save(session.playerData);
+                    return SaveResult.SAVED;
+                }
+            }
+            if (session.playerData.bookmarks.size() >= CPConfig.maxBookmarksPerPlayer) {
+                return SaveResult.LIMIT_REACHED;
+            }
+            session.playerData.bookmarks.add(new Bookmark(name, session.serverAddress, versionName, now, now));
+            handler.getPlayerStore().save(session.playerData);
+            return SaveResult.SAVED;
         }
-        if (session.playerData.bookmarks.size() >= CPConfig.maxBookmarksPerPlayer) {
-            return SaveResult.LIMIT_REACHED;
-        }
-        session.playerData.bookmarks.add(new Bookmark(name, session.serverAddress, versionName, now, now));
-        handler.getPlayerStore().save(session.playerData);
-        return SaveResult.SAVED;
     }
 
     private Item bookmarkItem(final Bookmark bookmark) {

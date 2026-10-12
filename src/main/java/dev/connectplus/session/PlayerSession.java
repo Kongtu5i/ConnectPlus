@@ -97,6 +97,12 @@ public class PlayerSession {
     @Nullable
     public volatile CPAccount account;
 
+    /** One credential observer per account, surviving lobby returns. Never persisted. */
+    public transient CPAccount observedAccount;
+    public transient PlayerData observedAccountData;
+    public transient SessionLease observedAccountLease;
+    public transient Runnable accountChangeUnsubscribe;
+
     /**
      * The persisted per-player data (bookmarks + encrypted account blob).
      */

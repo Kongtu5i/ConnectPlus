@@ -28,10 +28,19 @@ public interface CPAccount {
     UUID uuid();
 
     /**
-     * Whether the cached Minecraft token is expired and the account needs a
-     * (re-)login before use.
+     * Whether the cached Minecraft token needs refreshing before use.
+     * Expiry alone does not mean interactive authorization is required.
      */
     boolean isExpired();
+
+    /** Refreshes expired credentials. May block on authentication services. */
+    default void refresh() throws Exception {
+    }
+
+    /** Subscribes to credential changes; returns a listener removal action. */
+    default Runnable onChange(final Runnable listener) {
+        return () -> { };
+    }
 
     /**
      * Serializes the account's token chain; the only representation ever

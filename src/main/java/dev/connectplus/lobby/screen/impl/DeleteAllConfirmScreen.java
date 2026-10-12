@@ -51,24 +51,26 @@ public class DeleteAllConfirmScreen extends Screen {
      * tests can call it against a rigged handler.
      */
     void deleteAll(final PlayerSession session, final ScreenHandler screenHandler) {
-        final dev.connectplus.lobby.LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
-        //§6 (final fix): the destructive click is lease-gated like its entry item —
-        //a displaced session whose GUI is still alive during the bounded exit window
-        //must not delete the profile file the arriving holder is about to restore,
-        //and a session whose protected load is still in flight must not lazily
-        //create a wire-uuid scratch profile below.
-        if (!AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
-            sendChatLines(screenHandler, Languages.text(this.lang, Messages.MainScreen.Login.ChatLinkStale));
+        synchronized (session) {
+            final dev.connectplus.lobby.LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
+            //§6 (final fix): the destructive click is lease-gated like its entry item —
+            //a displaced session whose GUI is still alive during the bounded exit window
+            //must not delete the profile file the arriving holder is about to restore,
+            //and a session whose protected load is still in flight must not lazily
+            //create a wire-uuid scratch profile below.
+            if (!AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
+                sendChatLines(screenHandler, Languages.text(this.lang, Messages.MainScreen.Login.ChatLinkStale));
+                screenHandler.openScreen(new MainScreen(this.lang));
+                return;
+            }
+            session.account = null;
+            session.serverAddress = null;
+            session.targetVersion = null;
+            session.playerData = new PlayerData(session.uuid);
+            handler.getPlayerStore().delete(session.uuid);
+            sendChatLines(screenHandler, Languages.text(this.lang, Messages.Commands.AllDataDeleted));
             screenHandler.openScreen(new MainScreen(this.lang));
-            return;
         }
-        session.account = null;
-        session.serverAddress = null;
-        session.targetVersion = null;
-        session.playerData = new PlayerData(session.uuid);
-        handler.getPlayerStore().delete(session.uuid);
-        sendChatLines(screenHandler, Languages.text(this.lang, Messages.Commands.AllDataDeleted));
-        screenHandler.openScreen(new MainScreen(this.lang));
     }
 
     private String t(final Msg msg) {

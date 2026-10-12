@@ -127,6 +127,8 @@ public class Messages {
             public static final Msg ItemLoreLoggedIn = new Msg("MainScreen.Login.ItemLoreLoggedIn", "§aLogged in as §6{0}");
             public static final Msg ItemLoreNotLoggedIn = new Msg("MainScreen.Login.ItemLoreNotLoggedIn", "§cNot logged in");
             public static final Msg ItemLoreExpired = new Msg("MainScreen.Login.ItemLoreExpired", "§cLogin expired - click to login again");
+            public static final Msg ItemLoreRefreshing = new Msg("MainScreen.Login.ItemLoreRefreshing", "§6Restoring your login - click to retry without signing in again");
+            public static final Msg ChatRefreshing = new Msg("MainScreen.Login.ChatRefreshing", "§6Restoring your Microsoft login. Please wait a moment, then try again.");
             public static final Msg ChatLoading = new Msg("MainScreen.Login.ChatLoading", "§6Starting the Microsoft device code login...");
             public static final Msg ChatCodeLogin = new Msg("MainScreen.Login.ChatCodeLogin", """
                     §6To login, open §9{0}§r and enter the code §2{1}§r.""");
@@ -439,6 +441,8 @@ public class Messages {
                 public static String ItemLoreLoggedIn = "§a已登录: §6{0}";
                 public static String ItemLoreNotLoggedIn = "§c未登录";
                 public static String ItemLoreExpired = "§c登录已过期 - 点击重新登录";
+                public static String ItemLoreRefreshing = "§6正在恢复登录 - 点击重试，无需重新授权";
+                public static String ChatRefreshing = "§6正在恢复微软登录，请稍候再重试。";
                 public static String ChatLoading = "§6正在启动微软设备码登录...";
                 public static String ChatCodeLogin = """
                         §6请打开 §9{0}§r 并输入代码 §2{1}§r 完成登录。""";

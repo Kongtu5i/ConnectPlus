@@ -8,6 +8,8 @@ import net.raphimc.minecraftauth.msa.exception.MsaRequestException;
 import net.raphimc.minecraftauth.msa.model.MsaDeviceCode;
 import net.raphimc.minecraftauth.msa.service.impl.DeviceCodeMsaAuthService;
 import net.lenni0451.commons.httpclient.exceptions.HttpRequestException;
+import net.lenni0451.commons.httpclient.HttpClient;
+import net.raphimc.minecraftauth.util.holder.listener.BasicChangeListener;
 import net.raphimc.viaproxy.saves.impl.accounts.MicrosoftAccount;
 
 import javax.annotation.Nullable;
@@ -124,16 +126,17 @@ public final class CpAccounts {
      * failure (HTTP I/O, timeouts) → {@link Status#RETRYABLE_FAILURE}.</p>
      */
     public static RestoreResult restore(@Nullable final String json) {
+        return restore(json, MinecraftAuth.createHttpClient());
+    }
+
+    static RestoreResult restore(@Nullable final String json, final HttpClient httpClient) {
         if (json == null || json.isEmpty()) {
             return RestoreResult.corrupt("empty_blob");
         }
-        final MicrosoftAccount parsed;
+        final JavaAuthManager parsed;
         try {
-            //JavaAuthManager.fromJson only PARSES the JSON chain into the manager
-            //(no network IO); the MicrosoftAccount constructor below then refreshes
-            //its expired holders (which can hit the network) — the two phases are
-            //classified separately here.
-            parsed = new MicrosoftAccount(JsonParser.parseString(json).getAsJsonObject());
+            //Parse independently of refresh: authentication failures are not corrupt JSON.
+            parsed = JavaAuthManager.fromJson(httpClient, JsonParser.parseString(json).getAsJsonObject());
         } catch (final IllegalStateException | com.google.gson.JsonParseException | java.util.NoSuchElementException e) {
             //Malformed JSON or a JSON object without the JavaAuthManager chain:
             //permanently unreadable, never retryable. Errors (OOM etc.) propagate.
@@ -149,8 +152,8 @@ public final class CpAccounts {
     }
 
     /**
-     * Classifies a failure of the (network) token refresh that ran while
-     * constructing the account. Exposed for tests through
+     * Classifies a failure of the (network) token refresh, independently of
+     * JSON parsing. Exposed for tests through
      * {@code restoreThrowing}-style seams and for the restore path above.
      */
     static RestoreResult classifyRefreshFailure(final Throwable failure) {
@@ -189,20 +192,30 @@ public final class CpAccounts {
             "invalid_client"
     );
 
-    private static RestoreResult restoreFromParsed(final MicrosoftAccount parsed) {
+    private static RestoreResult restoreFromParsed(final JavaAuthManager parsed) {
         try {
-            return RestoreResult.restored(new ViaProxyAccount(parsed));
+            parsed.getMinecraftToken().refreshIfExpired();
+            parsed.getMinecraftProfile().refreshIfExpired();
+            //The JSON constructor does not refresh an existing token. Refresh explicitly
+            //above, then wrap without unnecessarily fetching chat certificates.
+            return RestoreResult.restored(new ViaProxyAccount(new MicrosoftAccount(JavaAuthManager.toJson(parsed))));
         } catch (final Exception e) {
-            //The refresh itself failed (MicrosoftAccount refreshes in its
-            //constructor): classify, never degrade into a logout.
+            return classifyRefreshFailure(e);
+        }
+    }
+
+    public static RestoreResult refresh(final CPAccount account) {
+        try {
+            account.refresh();
+            return account.isExpired() ? RestoreResult.retryableFailure("still_expired") : RestoreResult.restored(account);
+        } catch (final Exception e) {
             return classifyRefreshFailure(e);
         }
     }
 
     /**
-     * Test seam: classifies a refresh failure directly (the production path
-     * routes constructor failures of the parsed account through the same
-     * method).
+     * Test seam: classifies a refresh failure directly. Production restore and
+     * live-account renewal route their authentication failures through the same method.
      */
     public static RestoreResult restoreThrowing(final Throwable refreshFailure) {
         return classifyRefreshFailure(refreshFailure);
@@ -238,6 +251,20 @@ public final class CpAccounts {
         @Override
         public boolean isExpired() {
             return this.wrapped.getAuthManager().getMinecraftToken().isExpired();
+        }
+
+        @Override
+        public void refresh() throws Exception {
+            this.wrapped.getAuthManager().getMinecraftToken().refreshIfExpired();
+            this.wrapped.getAuthManager().getMinecraftProfile().refreshIfExpired();
+        }
+
+        @Override
+        public Runnable onChange(final Runnable listener) {
+            final BasicChangeListener bridge = listener::run;
+            final var listeners = this.wrapped.getAuthManager().getChangeListeners();
+            listeners.add(bridge);
+            return () -> listeners.remove(bridge);
         }
 
         @Override

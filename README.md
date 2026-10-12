@@ -10,7 +10,7 @@ ConnectPlus is a [ViaProxy](https://github.com/ViaVersion/ViaProxy) plugin. Its 
 
 Multiple players can share one proxy while choosing their own destination servers. With official Geyser-ViaProxy and the separate ConnectPlus-GeyserBridge extension installed, Bedrock players can also use the lobby and link their Bedrock account to their Java profile.
 
-This guide is for players and proxy administrators and describes **ConnectPlus 1.0.0 (pre-release)**. The ports shown are deployment examples; use the addresses and ports configured by your administrator.
+This guide is for players and proxy administrators and describes **ConnectPlus 1.0.1**. The ports shown are deployment examples; use the addresses and ports configured by your administrator.
 
 **Players who already have a proxy address** can jump to the [player guide](#player-guide): connect to the address provided by your administrator → set a destination address in the menu → sign in with Microsoft if needed → connect. To change servers, use `/dc` to return to the lobby, then choose another server.
 
@@ -55,7 +55,7 @@ ConnectPlus is suited to a shared connection entry point for yourself, friends, 
 
 | Component | Current requirement |
 | --- | --- |
-| ConnectPlus | Current version: `1.0.0` (pre-release) |
+| ConnectPlus | Current version: `1.0.1` |
 | Java runtime | ConnectPlus with only a Java entry point requires at least Java 17; the Bedrock bridge requires Java 21 or later. Java 21 can be used for a combined deployment, while also meeting the hosts' own requirements |
 | ViaProxy | Use an unmodified official build. The plugin requires at least `3.4.13`; the Bedrock bridge supports the `3.4.x` series from `3.4.13` onward |
 | Geyser-ViaProxy, for Bedrock access | Use an unmodified official `2.11.x` build, at least `2.11.3` |
@@ -363,10 +363,12 @@ The main menu's **Save login information** lever is enabled by default:
 
 | Setting | Effect |
 | --- | --- |
-| Enabled | Store encrypted sign-in information on the proxy for restoration on later visits; expired or invalid credentials can still require authorization again |
+| Enabled | Store encrypted sign-in information on the proxy for later visits; expired access tokens renew automatically and updated credentials are saved. Sign in again only when authorization is no longer valid |
 | Disabled | Immediately remove saved account credentials from the current profile while keeping the current connection's sign-in usable; sign in again after leaving the proxy |
 
 Returning to the lobby and switching destinations remain part of the same proxy connection. Disabling saving does not immediately log you out or delete bookmarks. Enabling it again lets the current usable sign-in be saved.
+
+Wait for sign-in restoration before connecting. Temporary authentication-service failures keep your saved credentials and retry automatically; click the account button to retry sooner without starting a new device-code authorization.
 
 Bookmarks, preferences, and saved account data reside **on the proxy server**. Tokens are encrypted with AES-GCM, using the proxy's `secret.key` file. Administrators should protect the data directory, and players should authorize accounts only on a proxy they trust.
 

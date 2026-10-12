@@ -34,6 +34,17 @@ public final class ConnectFlow {
         if (session.serverAddress == null || switchInitiator == null) {
             return SwitchInitiator.StartResult.NOT_AVAILABLE;
         }
+        final LobbyServerHandler handler = out.getHandler();
+        if (AccountLoginPolicy.isAllowedForSession(session) && !session.offlineMode()
+                && dev.connectplus.lobby.screen.impl.AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())
+                && (handler.isAccountRefreshing() || (handler.canRetryAccount()
+                && (session.account != null && session.account.isExpired()
+                || session.account == null && session.playerData != null && session.playerData.saveLoginInfo
+                && session.playerData.accountBlob != null)))) {
+            handler.requestAccountRefresh();
+            return SwitchInitiator.StartResult.REJECTED_BUSY;
+        }
+        handler.watchAccountChanges(session);
         final boolean credentialsPermitted = AccountLoginPolicy.isAllowedForSession(session) && !session.offlineMode()
                 && session.account != null
                 && dev.connectplus.lobby.screen.impl.AccountFlow.isLeaseCurrent(session, out.getHandler().getLeaseGranter());

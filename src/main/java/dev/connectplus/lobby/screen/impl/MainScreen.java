@@ -63,6 +63,7 @@ public class MainScreen extends Screen {
     @Override
     public void init(final ScreenHandler screenHandler, final ItemList itemList) {
         final PlayerSession session = screenHandler.getStateHandler().getHandler().getSession();
+        screenHandler.getStateHandler().getHandler().refreshAccountIfNeeded();
         final boolean hasAddress = session.serverAddress != null;
         final boolean hasVersion = session.targetVersion != null;
         // The stable Bedrock container is six rows: the bottom actions move
@@ -123,6 +124,14 @@ public class MainScreen extends Screen {
                 for (final TextComponent component : Messages.format(this.t(Messages.Commands.AccountLoginDisabled))) {
                     screenHandler.getStateHandler().send(new S2CSystemChatPacket(component, false));
                 }
+            } else if (screenHandler.getStateHandler().getHandler().isAccountRefreshing()
+                    || ((session.account != null && session.account.isExpired()
+                    || session.account == null && session.playerData != null && session.playerData.accountBlob != null)
+                    && screenHandler.getStateHandler().getHandler().canRetryAccount())) {
+                screenHandler.getStateHandler().getHandler().requestAccountRefresh();
+                for (final TextComponent component : Messages.format(this.t(Messages.MainScreen.Login.ChatRefreshing))) {
+                    screenHandler.getStateHandler().send(new S2CSystemChatPacket(component, false));
+                }
             } else if (session.account != null && !session.account.isExpired()) {
                 //Logged in and valid: the click logs out (the stored account is removed)
                 final dev.connectplus.lobby.LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
@@ -158,12 +167,14 @@ public class MainScreen extends Screen {
             //profile the new holder now owns. For a proxied session with neither
             //lease nor data the protected load is still in flight (final fix) —
             //the lazy-init must not create a wire-uuid scratch profile either.
-            if (!AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
-                return;
+            synchronized (session) {
+                if (!AccountFlow.isLeaseCurrent(session, handler.getLeaseGranter())) {
+                    return;
+                }
+                if (session.playerData == null) session.playerData = new PlayerData(session.uuid);
+                session.playerData.offlineMode = !session.playerData.offlineMode;
+                handler.getPlayerStore().save(session.playerData);
             }
-            if (session.playerData == null) session.playerData = new PlayerData(session.uuid);
-            session.playerData.offlineMode = !session.playerData.offlineMode;
-            handler.getPlayerStore().save(session.playerData);
                     for (final TextComponent component : Messages.format(this.t(session.offlineMode()
                             ? Messages.MainScreen.OfflineMode.ChatEnabled : Messages.MainScreen.OfflineMode.ChatDisabled))) {
                         screenHandler.getStateHandler().send(new S2CSystemChatPacket(component, false));
@@ -284,8 +295,7 @@ public class MainScreen extends Screen {
     }
 
     /**
-     * The account entry: not logged in / expired = login (or re-login), logged
-     * in and valid = one-click logout (design F5.1/F5.4).
+     * Expired cached tokens are renewed before asking for interactive authorization.
      */
     private Item accountItem(final ScreenHandler screenHandler, final PlayerSession session) {
         final boolean enabled = AccountLoginPolicy.isAllowedForSession(session);
@@ -298,7 +308,9 @@ public class MainScreen extends Screen {
             } else if (loggedIn && !expired) {
                 builder.lore(Messages.format(this.t(Messages.MainScreen.Login.ItemLoreLoggedIn), session.account.displayName()));
             } else if (expired) {
-                builder.lore(Messages.format(this.t(Messages.MainScreen.Login.ItemLoreExpired)));
+                builder.lore(Messages.format(this.t(Messages.MainScreen.Login.ItemLoreRefreshing)));
+            } else if (screenHandler.getStateHandler().getHandler().isAccountRefreshing()) {
+                builder.lore(Messages.format(this.t(Messages.MainScreen.Login.ItemLoreRefreshing)));
             } else {
                 builder.lore(Messages.format(this.t(Messages.MainScreen.Login.ItemLoreNotLoggedIn)));
             }
@@ -329,40 +341,42 @@ public class MainScreen extends Screen {
      * Package-private for the lease-gate pinning tests.
      */
     void toggleSaveLogin(final PlayerSession session, final ScreenHandler screenHandler) {
-        final dev.connectplus.lobby.LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
-        //§6 settings save (final fix): a displaced session's toggle must not
-        //rewrite the profile, and a session whose protected load is still in
-        //flight must not lazily create a wire-uuid scratch profile — the guard
-        //now covers the in-flight window too, so the null check is folded in.
-        if (!AccountFlow.leaseCurrent(session, handler.getLeaseGranter())) {
-            return; // the profile was taken over (or is still loading): no write may race the real landing
-        }
-        if (session.playerData == null) {
-            session.playerData = new PlayerData(session.uuid);
-        }
-        if ((session.account != null || session.playerData.accountBlob != null)
-                && !AccountLoginPolicy.isAllowedForSession(session)) return;
-        final boolean enabling = !session.playerData.saveLoginInfo;
-        String accountBlob = session.playerData.accountBlob;
-        if (enabling) {
-            if (session.account != null) {
-                if (!AccountLoginPolicy.isAllowedForSession(session)) return;
-                accountBlob = handler.getTokenStore().encrypt(session.account.toJson());
-                if (!AccountLoginPolicy.isAllowedForSession(session)) return;
+        synchronized (session) {
+            final dev.connectplus.lobby.LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
+            //§6 settings save (final fix): a displaced session's toggle must not
+            //rewrite the profile, and a session whose protected load is still in
+            //flight must not lazily create a wire-uuid scratch profile — the guard
+            //now covers the in-flight window too, so the null check is folded in.
+            if (!AccountFlow.leaseCurrent(session, handler.getLeaseGranter())) {
+                return; // the profile was taken over (or is still loading): no write may race the real landing
             }
-        } else {
-            accountBlob = null;
+            if (session.playerData == null) {
+                session.playerData = new PlayerData(session.uuid);
+            }
+            if ((session.account != null || session.playerData.accountBlob != null)
+                    && !AccountLoginPolicy.isAllowedForSession(session)) return;
+            final boolean enabling = !session.playerData.saveLoginInfo;
+            String accountBlob = session.playerData.accountBlob;
+            if (enabling) {
+                if (session.account != null) {
+                    if (!AccountLoginPolicy.isAllowedForSession(session)) return;
+                    accountBlob = handler.getTokenStore().encrypt(session.account.toJson());
+                    if (!AccountLoginPolicy.isAllowedForSession(session)) return;
+                }
+            } else {
+                accountBlob = null;
+            }
+            if (!AccountFlow.leaseCurrent(session, handler.getLeaseGranter())) return;
+            session.playerData.saveLoginInfo = enabling;
+            session.playerData.accountBlob = accountBlob;
+            handler.getPlayerStore().save(session.playerData);
+            for (final TextComponent component : Messages.format(this.t(enabling
+                    ? Messages.MainScreen.SaveLoginInfo.ChatEnabled
+                    : Messages.MainScreen.SaveLoginInfo.ChatDisabled))) {
+                screenHandler.getStateHandler().send(new S2CSystemChatPacket(component, false));
+            }
+            screenHandler.refreshScreen();
         }
-        if (!AccountFlow.leaseCurrent(session, handler.getLeaseGranter())) return;
-        session.playerData.saveLoginInfo = enabling;
-        session.playerData.accountBlob = accountBlob;
-        handler.getPlayerStore().save(session.playerData);
-        for (final TextComponent component : Messages.format(this.t(enabling
-                ? Messages.MainScreen.SaveLoginInfo.ChatEnabled
-                : Messages.MainScreen.SaveLoginInfo.ChatDisabled))) {
-            screenHandler.getStateHandler().send(new S2CSystemChatPacket(component, false));
-        }
-        screenHandler.refreshScreen();
     }
 
 
