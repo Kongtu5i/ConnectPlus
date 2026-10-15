@@ -136,6 +136,7 @@ public class Messages {
             public static final Msg ChatLoginSuccess = new Msg("MainScreen.Login.ChatLoginSuccess", "§aLogin successful");
             public static final Msg ChatLoginFailed = new Msg("MainScreen.Login.ChatLoginFailed", "§cLogin failed: {0}");
             public static final Msg ChatLogout = new Msg("MainScreen.Login.ChatLogout", "§aLogged out - the stored account was removed from this proxy");
+            public static final Msg ChatLogoutFailed = new Msg("MainScreen.Login.ChatLogoutFailed", "§cCould not remove the saved login. Your current account is unchanged; please try again later.");
             public static final Msg ChatLinkWarning = new Msg("MainScreen.Login.ChatLinkWarning", """
                     §6After linking a Java account, your current Bedrock profile will be cleared and its bookmarks will NOT be kept. Please back them up in advance. After linking, the Java account's profile will be used; if that account has no existing profile, a new one will be created.""");
             public static final Msg ChatLinkCommitted = new Msg("MainScreen.Login.ChatLinkCommitted", "§aJava account linked. Your profile is now the Java account's profile.");
@@ -175,6 +176,7 @@ public class Messages {
             public static final Msg ItemLore = new Msg("MainScreen.SaveLoginInfo.ItemLore", "§bClick to toggle whether your account login is kept on this proxy");
             public static final Msg ItemLoreEnabled = new Msg("MainScreen.SaveLoginInfo.ItemLoreEnabled", "§aEnabled§7 - your login stays on this proxy after you disconnect");
             public static final Msg ItemLoreDisabled = new Msg("MainScreen.SaveLoginInfo.ItemLoreDisabled", "§cDisabled§7 - your login is wiped when you disconnect");
+            public static final Msg TrustWarning = new Msg("MainScreen.SaveLoginInfo.TrustWarning", "§cYour account will be saved on this server. Make sure you trust this server.");
             public static final Msg ChatEnabled = new Msg("MainScreen.SaveLoginInfo.ChatEnabled", "§aLogin information will be saved on this proxy - your login survives reconnects.");
             public static final Msg ChatDisabled = new Msg("MainScreen.SaveLoginInfo.ChatDisabled", "§6Login information will not be saved - all account login information is wiped when you disconnect from this proxy.");
         }
@@ -235,6 +237,14 @@ public class Messages {
         public static final Msg DeleteConfirmText = new Msg("BookmarksScreen.DeleteConfirmText", "§cDelete §6{0}§c? This cannot be undone.");
         public static final Msg ConfirmDelete = new Msg("BookmarksScreen.ConfirmDelete", "§cDelete");
         public static final Msg Cancel = new Msg("BookmarksScreen.Cancel", "§7Cancel");
+    }
+
+    public static class AccountLoginConfirmScreen {
+        public static final Msg Title = new Msg("AccountLoginConfirmScreen.Title", "§6Sign in to Microsoft again?");
+        public static final Msg Warning = new Msg("AccountLoginConfirmScreen.Warning", "§eYou are signed in to Microsoft. Signing in again will remove the previous account record.");
+        public static final Msg Confirm = new Msg("AccountLoginConfirmScreen.Confirm", "§cConfirm and sign in again");
+        public static final Msg Back = new Msg("AccountLoginConfirmScreen.Back", "§7Back");
+        public static final Msg Stale = new Msg("AccountLoginConfirmScreen.Stale", "§cYour account or session changed. Please return to the main menu and try again.");
     }
 
     public static class DeleteAllScreen {
@@ -450,6 +460,7 @@ public class Messages {
                 public static String ChatLoginSuccess = "§a登录成功";
                 public static String ChatLoginFailed = "§c登录失败: {0}";
                 public static String ChatLogout = "§a已注销 - 存储在本代理上的账号已移除";
+                public static String ChatLogoutFailed = "§c未能清除已保存的登录记录，当前账号保持不变，请稍后重试。";
                 public static String ChatLinkWarning = "§6关联 Java 账号后，当前基岩版档案将被清除，其中的书签不会保留。请提前做好备份。关联后将使用 Java 账号的档案；若该账号没有已有档案，将创建新档案。";
                 public static String ChatLinkCommitted = "§a关联成功，当前已使用 Java 账号的档案。";
                 public static String ChatLinkCommittedCleanupPending = "§a关联成功。旧基岩版档案将在后台自动清理。";
@@ -475,6 +486,7 @@ public class Messages {
                 public static String ItemLore = "§b点击切换是否在本代理上保存你的账号登录信息";
                 public static String ItemLoreEnabled = "§a已开启§7 - 断开连接后登录信息仍保留在本代理上";
                 public static String ItemLoreDisabled = "§c已关闭§7 - 断开连接时将清除你的登录信息";
+                public static String TrustWarning = "§c你的账户会保留在当前服务器上，请确保这是你信任的服务器。";
                 public static String ChatEnabled = "§a已开启保存登录信息 - 重新连接后无需再次登录。";
                 public static String ChatDisabled = "§6已关闭保存登录信息 - 断开与代理的连接时将清除你的所有账号登录信息。";
             }
@@ -533,6 +545,14 @@ public class Messages {
             public static String DeleteConfirmText = "§c确定删除 §6{0}§c 吗？此操作不可撤销。";
             public static String ConfirmDelete = "§c删除";
             public static String Cancel = "§7取消";
+        }
+
+        public static class AccountLoginConfirmScreen {
+            public static String Title = "§6重新登录微软账号？";
+            public static String Warning = "§e已登录微软账号，再次登录会清除之前账号记录。";
+            public static String Confirm = "§c确认并重新登录";
+            public static String Back = "§7返回";
+            public static String Stale = "§c账号或会话已变化，请返回主菜单后重试。";
         }
 
         public static class DeleteAllScreen {

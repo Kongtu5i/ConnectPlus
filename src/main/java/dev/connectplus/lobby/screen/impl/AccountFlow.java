@@ -600,23 +600,39 @@ public final class AccountFlow {
      * file the arriving same-identity holder is about to restore.</p>
      */
     public static void logout(final PlayerSession session, final ScreenHandler screenHandler, final LobbyServerHandler handler) {
+        logoutSafely(session, screenHandler, handler);
+    }
+
+    /** Returns success only after the old persisted credentials have been removed. */
+    static boolean logoutSafely(final PlayerSession session, final ScreenHandler screenHandler, final LobbyServerHandler handler) {
         synchronized (session) {
             if (!AccountLoginPolicy.isAllowedForSession(session)) {
                 sendChatLines(screenHandler, Languages.text(Lang.of(session), Messages.Commands.AccountLoginDisabled));
-                return;
+                return false;
             }
             if (!leaseCurrent(session, handler.getLeaseGranter())) {
                 //The profile (and its stored credentials) belongs to the new holder now.
                 sendChatLines(screenHandler, Languages.text(Lang.of(session), Messages.MainScreen.Login.ChatLinkStale));
-                return;
+                return false;
+            }
+            if (session.playerData != null) {
+                final String previousBlob = session.playerData.accountBlob;
+                session.playerData.accountBlob = null;
+                try {
+                    handler.getPlayerStore().save(session.playerData.key, session.playerData);
+                } catch (final java.io.IOException e) {
+                    session.playerData.accountBlob = previousBlob;
+                    LoggerFactory.getLogger("ConnectPlus").warn("Removing the stored account of {} failed ({})",
+                            session.uuid, e.getClass().getSimpleName());
+                    sendChatLines(screenHandler, Languages.text(Lang.of(session), Messages.MainScreen.Login.ChatLogoutFailed));
+                    return false;
+                }
             }
             session.account = null;
-            if (session.playerData != null) {
-                session.playerData.accountBlob = null;
-                handler.getPlayerStore().save(session.playerData);
-            }
+            handler.watchAccountChanges(session);
             final Lang lang = Lang.of(session);
             sendChatLines(screenHandler, Languages.text(lang, Messages.MainScreen.Login.ChatLogout));
+            return true;
         }
     }
 

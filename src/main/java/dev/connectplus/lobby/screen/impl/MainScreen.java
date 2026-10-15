@@ -133,7 +133,7 @@ public class MainScreen extends Screen {
                     screenHandler.getStateHandler().send(new S2CSystemChatPacket(component, false));
                 }
             } else if (session.account != null && !session.account.isExpired()) {
-                //Logged in and valid: the click logs out (the stored account is removed)
+                //Replacing a valid login requires a separate confirmation click.
                 final dev.connectplus.lobby.LobbyServerHandler handler = screenHandler.getStateHandler().getHandler();
                 //§6 (final fix): logout is the one path that clears stored
                 //credentials — a displaced session whose GUI is still alive during
@@ -145,8 +145,7 @@ public class MainScreen extends Screen {
                     }
                     return;
                 }
-                AccountFlow.logout(session, screenHandler, handler);
-                screenHandler.openScreen(new MainScreen(this.lang));
+                screenHandler.openScreen(new AccountLoginConfirmScreen(this.lang, session));
             } else if (!AccountFlow.allowlisted(session)) {
                 for (final TextComponent component : Messages.format(this.t(Messages.Commands.AccountLoginNotAllowed))) {
                     screenHandler.getStateHandler().send(new S2CSystemChatPacket(component, false));
@@ -328,6 +327,7 @@ public class MainScreen extends Screen {
             builder.lore(Messages.format(this.t(save
                     ? Messages.MainScreen.SaveLoginInfo.ItemLoreEnabled
                     : Messages.MainScreen.SaveLoginInfo.ItemLoreDisabled)));
+            builder.lore(Messages.format(this.t(Messages.MainScreen.SaveLoginInfo.TrustWarning)));
         }).get();
     }
 

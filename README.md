@@ -378,7 +378,7 @@ Bookmarks, preferences, and saved account data reside **on the proxy server**. T
 | --- | --- |
 | Enable personal **Offline mode** (redstone torch) | Use your original player name and its offline UUID for destination connections, without sending Microsoft credentials; keep lobby sign-in and bookmarks. The choice also applies to bookmarks, reconnection, and server transfers |
 | Disable personal offline mode | Use an available, permitted Microsoft sign-in for destination connections; without an account, you do not automatically obtain an authenticated identity |
-| Click the signed-in account item to **log out** | Remove the current sign-in and credentials saved in that profile; keep bookmarks |
+| Click the signed-in account item to **sign in again** | Show a confirmation first; confirming removes the previous sign-in and saved credentials, then starts Microsoft authorization. Keep bookmarks; going back or closing the page keeps the existing sign-in |
 | Disable **Save login information** | Keep using the sign-in for the current connection, without restoring it after leaving the proxy |
 | Choose **Delete all data** (TNT) and confirm | Clear the current player profile's account, bookmarks, and settings, and reset the current session; this cannot be undone |
 
