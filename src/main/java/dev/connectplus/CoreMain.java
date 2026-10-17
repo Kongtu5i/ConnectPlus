@@ -289,7 +289,8 @@ public class CoreMain extends ViaProxyPlugin {
                         this::accessNames,
                         accessConsole,
                         this.accessService,
-                        this.consoleExecutor);
+                        this.consoleExecutor,
+                        new dev.connectplus.compat.OnlinePlayerQuery(() -> this.accessRegistry, () -> this.lobbyServer)::snapshot);
         this.registerListener(new dev.connectplus.commands.ConsoleCommandListener(consoleService::execute));
     }
 

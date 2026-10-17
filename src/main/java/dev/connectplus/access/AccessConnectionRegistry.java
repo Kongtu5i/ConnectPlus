@@ -92,6 +92,12 @@ public final class AccessConnectionRegistry {
                 .toList();
     }
 
+    /** Current immutable view of one connection, or null after it is removed. */
+    public Connection get(final UUID connectionId) {
+        final Entry entry = this.entries.get(connectionId);
+        return entry == null ? null : new Connection(connectionId, entry.c2p, entry.subject, entry.status, entry.generation);
+    }
+
     /** The entry of this exact channel, or null. */
     public Connection byChannel(final Channel c2p) {
         for (final var e : this.entries.entrySet()) {

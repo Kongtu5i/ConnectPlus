@@ -10,7 +10,7 @@ ConnectPlus is a [ViaProxy](https://github.com/ViaVersion/ViaProxy) plugin. Its 
 
 Multiple players can share one proxy while choosing their own destination servers. With official Geyser-ViaProxy and the separate ConnectPlus-GeyserBridge extension installed, Bedrock players can also use the lobby and link their Bedrock account to their Java profile.
 
-This guide is for players and proxy administrators and describes **ConnectPlus 1.0.1**. The ports shown are deployment examples; use the addresses and ports configured by your administrator.
+This guide is for players and proxy administrators and describes **ConnectPlus 1.0.2**. The ports shown are deployment examples; use the addresses and ports configured by your administrator.
 
 **Players who already have a proxy address** can jump to the [player guide](#player-guide): connect to the address provided by your administrator → set a destination address in the menu → sign in with Microsoft if needed → connect. To change servers, use `/dc` to return to the lobby, then choose another server.
 
@@ -55,7 +55,7 @@ ConnectPlus is suited to a shared connection entry point for yourself, friends, 
 
 | Component | Current requirement |
 | --- | --- |
-| ConnectPlus | Current version: `1.0.1` |
+| ConnectPlus | Current version: `1.0.2` |
 | Java runtime | ConnectPlus with only a Java entry point requires at least Java 17; the Bedrock bridge requires Java 21 or later. Java 21 can be used for a combined deployment, while also meeting the hosts' own requirements |
 | ViaProxy | Use an unmodified official build. The plugin requires at least `3.4.13`; the Bedrock bridge supports the `3.4.x` series from `3.4.13` onward |
 | Geyser-ViaProxy, for Bedrock access | Use an unmodified official `2.11.x` build, at least `2.11.3` |
@@ -443,9 +443,9 @@ Enter these in the **ViaProxy console**, using `cp` or `connectplus` as the root
 | Command | Description |
 | --- | --- |
 | `cp help` | List available commands, aliases, and arguments |
-| `cp status` | Show the configured mode, actual host listen address, internal lobby address, lobby session count, in-flight destination connections, unexpected lobby exception count for this run, and bridge registration; access lists show configured/runtime switches and account counts in four-line indented blocks |
-| `cp list` | List current lobby sessions, each player's online/offline choice for destinations, and Microsoft sign-in state; this is not a list of everyone playing on destinations |
-| `cp info <player>` | Query original Java UUID/XUID, lobby online status, bookmark count, and links from current lobby sessions or historical records; supports case-insensitive names, offline queries, and Bedrock names containing spaces; queried and linked identities each show whitelist/blacklist membership even when switches are off |
+| `cp status` | Show the configured mode, actual host listen address, internal lobby address, the same grouped online counts as `cp list` without player details, in-flight destination connections, unexpected lobby exception count for this run, and Geyser bridge plugin registration and versions; access lists show configured/runtime switches and account counts in four-line indented blocks |
+| `cp list` | Group current proxy players by lobby or other servers; show player names and client versions, plus server versions for players connected to other servers, without server addresses, backend mode, or Microsoft sign-in state |
+| `cp info <player>` | Query original Java UUID/XUID, online status, location, client version, bookmark count, and links using live ViaProxy connections and historical records; supports case-insensitive names, offline queries, and Bedrock names containing spaces; queried and linked identities each show whitelist/blacklist membership even when switches are off |
 | `cp links` | List committed Bedrock → Java links with both names and identity IDs, without account tokens |
 | `cp accounts` | Show the recorded total visitor count, deduplicated using current links, plus Java/Bedrock identity counts and merged counts |
 | `cp version` | Show actual ConnectPlus, ViaProxy, and bridge protocol versions; include bridge and Geyser versions when registered |
@@ -468,7 +468,9 @@ cp debug on
 
 `cp info` groups results by identity; distinct identities with the same name can appear separately. Queries do not create player profiles. `cp accounts` counts people who actually entered the lobby, not signed-in Microsoft accounts or current online players. Recording starts when the visitor index was introduced and cannot reconstruct unrecorded visits from before that upgrade. Linking merges visitor counts, and unlinking separates them again.
 
-In `cp info`, `[在线]` means currently in the lobby, and `[离线]` means there is no current lobby session. The latter can also describe someone playing on a destination, so it does not establish that the player has left the proxy.
+`cp list` and `cp info` use the current ViaProxy client connections to determine online status. Players remain online after leaving the lobby for another server, and become offline after disconnecting from the proxy. `cp info` shows a “当前服务器” address and port only for players connected to another server; this field is hidden in the lobby. `cp list` never shows server addresses. Unfinished switches are labelled “切服中” rather than counted as already connected to another server. Failed or timed-out queries report unavailable status instead of treating missing results as offline.
+
+Client versions come from the entry connection: Java shows the client protocol version (a range for versions sharing one protocol, such as `Java 1.20-1.20.1`). Bedrock shows the original client version obtained through the installed Geyser public API, or “基岩（版本未知）” when unavailable, never the translated Java version. For players connected to other servers, `cp info` appends the server version to “当前位置：其他服务器”, and `cp list` includes it in the player row. This version comes from the current ViaProxy backend connection and displays “未知” when unavailable. Only players still connected through this ViaProxy instance can be queried.
 
 If a visitor or link index is corrupt, the relevant queries report it as unavailable, not as zero people, and do not overwrite the original file. The `cp status` exception count includes only unexpected exceptions recorded by lobby handlers, not every JVM, ViaProxy, or Geyser error.
 
@@ -578,6 +580,8 @@ plugins/ConnectPlus/languages/zh.yml
 ```
 
 Edit these texts directly and restart to apply them. Deleting a text key or leaving it blank falls back to built-in text. To add another language, copy `en.yml` to a file such as `fr.yml`, translate it, and set `language: fr`. Missing keys in a custom pack fall back to English.
+
+Console queries, including `cp status`, `cp list`, and `cp info`, also follow `language` for help, errors, locations, and unknown-version messages. Their texts are in the `Console` section; access-list management uses `ConsoleAccess`. Use `language: en` for English or `language: zh` for Chinese. The console has no client locale, so `auto` falls back to English. After upgrading and restarting, missing entries are added to existing `en.yml` / `zh.yml` files while preserving existing translations and comments; deleting old language files is unnecessary.
 
 With `language: auto`, each player's client locale selects a pack: for example, `zh_cn` selects `zh`, and `de_de` selects `de` when `de.yml` exists. If no pack matches, English is used. After changing the in-game language, reconnect to the lobby to apply language selection.
 

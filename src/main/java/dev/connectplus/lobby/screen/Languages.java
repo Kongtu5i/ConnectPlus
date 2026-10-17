@@ -134,6 +134,18 @@ public final class Languages {
         return text(lang == null ? null : lang.code(), msg);
     }
 
+    private static final java.util.regex.Pattern CONSOLE_PLACEHOLDERS = java.util.regex.Pattern.compile("\\{(\\d+)\\}");
+
+    /** Plain console text: respect configured/custom packs; auto has no client locale and falls back to English. */
+    public static String consoleText(final Msg message, final Object... arguments) {
+        final String template = text(forLocale(null), message);
+        return CONSOLE_PLACEHOLDERS.matcher(template).replaceAll(match -> {
+            final int index = Integer.parseInt(match.group(1));
+            return java.util.regex.Matcher.quoteReplacement(index < arguments.length
+                    ? String.valueOf(arguments[index]) : match.group());
+        });
+    }
+
     /**
      * The language of a session under the configured {@link CPConfig#language}:
      * a concrete code is served to everyone, "auto" follows the client locale.

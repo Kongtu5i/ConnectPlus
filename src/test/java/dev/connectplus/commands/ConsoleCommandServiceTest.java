@@ -19,6 +19,12 @@ import dev.connectplus.session.PlayerVisitStore;
 import dev.connectplus.session.SessionRegistry;
 import dev.connectplus.config.CPConfig;
 import dev.connectplus.testutil.StubAccount;
+import dev.connectplus.testutil.OnlineConnection;
+import dev.connectplus.compat.OnlinePlayerQuery;
+import dev.connectplus.lobby.screen.Languages;
+import dev.connectplus.access.AccessConnectionRegistry;
+import dev.connectplus.access.AccessSubject;
+import com.viaversion.viaversion.api.protocol.version.ProtocolVersion;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -61,11 +67,15 @@ class ConsoleCommandServiceTest {
     private SessionRegistry registry;
     private BedrockBridgeEndpoint endpoint;
     private boolean oldDebug;
+    private String oldLanguage;
     private org.apache.logging.log4j.core.Logger logger;
     private Level originalLevel;
 
     @BeforeEach
     void setUp() {
+        this.oldLanguage = CPConfig.language;
+        CPConfig.language = "zh";
+        Languages.init(null);
         this.executor = Executors.newSingleThreadExecutor();
         this.playerStore = new PlayerStore(new File(this.dataDir, "players"));
         this.linkStore = new IdentityLinkStore(this.playerStore.playersDir());
@@ -81,6 +91,8 @@ class ConsoleCommandServiceTest {
 
     @AfterEach
     void tearDown() {
+        CPConfig.language = this.oldLanguage;
+        Languages.init(null);
         DebugLog.setRuntimeEnabled(null);
         CPConfig.debug = this.oldDebug;
         this.logger.setLevel(this.originalLevel);
@@ -91,6 +103,21 @@ class ConsoleCommandServiceTest {
     }
 
     private ConsoleCommandService service() throws IOException {
+        return service(this::lobbySnapshot);
+    }
+
+    private OnlinePlayerQuery.Snapshot lobbySnapshot() {
+        if (this.lobbyServer == null) return new OnlinePlayerQuery.Snapshot(List.of(), true);
+        return new OnlinePlayerQuery.Snapshot(this.registry.snapshot().stream().map(session -> {
+            final ClientIdentity identity = dev.connectplus.compat.LobbyLink.sessionIdentity(session);
+            final boolean bedrock = identity != null && identity.kind() == ClientIdentity.Kind.VERIFIED_BEDROCK;
+            return new OnlinePlayerQuery.Player(session.connectionId, session.name, session.uuid, identity,
+                    bedrock ? "基岩（版本未知）" : session.clientVersion == null ? "Java（版本未知）" : "Java " + session.clientVersion.getName(),
+                    OnlinePlayerQuery.Location.LOBBY, null, null, session);
+        }).toList(), true);
+    }
+
+    private ConsoleCommandService service(final java.util.function.Supplier<OnlinePlayerQuery.Snapshot> online) throws IOException {
         return new ConsoleCommandService(
                 () -> this.lobbyServer,
                 () -> this.endpoint,
@@ -102,7 +129,7 @@ class ConsoleCommandServiceTest {
                 () -> this.visits,
                 accessConsoleStub(),
                 this.accessService(),
-                this.executor);
+                this.executor, online);
     }
 
     private AccessService cachedAccessService;
@@ -158,7 +185,7 @@ class ConsoleCommandServiceTest {
                 () -> this.visits,
                 accessConsoleStub(),
                 this.accessService(),
-                this.executor);
+                this.executor, this::lobbySnapshot);
 
         final String before = String.join("\n",
                 lateBindingService.execute(new Command(Type.STATUS, null)).toCompletableFuture().get(10, TimeUnit.SECONDS));
@@ -190,6 +217,58 @@ class ConsoleCommandServiceTest {
     // ---- status ----------------------------------------------------------
 
     @Test
+    void englishConfigurationLocalizesLiveQueriesAndRootCommandOutput() throws Exception {
+        CPConfig.language = "en";
+        final AccessConnectionRegistry connections = new AccessConnectionRegistry();
+        final OnlinePlayerQuery query = new OnlinePlayerQuery(() -> connections, () -> null);
+        final UUID uuid = UUID.randomUUID();
+        final ClientIdentity identity = ClientIdentity.verifiedJava(uuid, "Traveler", uuid);
+        this.visits.recordVisit(uuid, "Traveler", identity);
+        try (final OnlineConnection pc = new OnlineConnection(connections,
+                new AccessSubject(AccessKey.ClientType.JAVA, "Traveler", uuid, null), identity, ProtocolVersion.v1_20_2)) {
+            pc.serverVersion = ProtocolVersion.v1_21_4;
+            final ConsoleCommandService service = this.service(query::snapshot);
+            final String list = String.join("\n", service.execute(new Command(Type.LIST, null)).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(list.contains("Traveler | Client version: Java 1.20.2 | Server version: 1.21.4"), list);
+            final String info = String.join("\n", service.execute(new Command(Type.INFO, "Traveler")).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(info.contains("Traveler [Online]") && info.contains("Current location: Other server (server version: 1.21.4)"), info);
+            assertTrue(info.contains("Current server: private.example.com:25565"), info);
+            for (final Type type : List.of(Type.STATUS, Type.LIST, Type.INFO, Type.HELP, Type.USAGE, Type.LINKS, Type.ACCOUNTS, Type.VERSION)) {
+                final String output = String.join("\n", service.execute(new Command(type, "Traveler")).toCompletableFuture().get(10, TimeUnit.SECONDS));
+                assertFalse(java.util.regex.Pattern.compile("\\p{IsHan}").matcher(output).find(), type + ": " + output);
+            }
+        }
+    }
+
+    @Test
+    void existingAndCustomLanguagePacksOverrideConsoleLinesWithoutLosingTranslations() throws Exception {
+        final java.nio.file.Path languages = this.dataDir.toPath().resolve("languages");
+        Files.createDirectories(languages);
+        final String oldEnglish = "# Keep this comment\nConsole:\n  OnlineTotal: 'Custom total: {0}'\n";
+        final String oldChinese = "# 保留此注释\nConsole:\n  OnlineTotal: '自定义在线：{0}'\n";
+        Files.writeString(languages.resolve("en.yml"), oldEnglish);
+        Files.writeString(languages.resolve("zh.yml"), oldChinese);
+        Files.writeString(languages.resolve("fr.yml"), "Console:\n  OnlineTotal: 'Joueurs : {0}'\n");
+        Languages.init(this.dataDir);
+        CPConfig.language = "en";
+        final List<String> english = this.run(Type.STATUS, null);
+        assertTrue(english.contains("Custom total: 0"), english.toString());
+        assertTrue(english.contains("    Players in lobby (0)"), english.toString());
+        CPConfig.language = "zh";
+        final List<String> chinese = this.run(Type.STATUS, null);
+        assertTrue(chinese.contains("自定义在线：0"), chinese.toString());
+        assertTrue(chinese.contains("    大厅中的玩家（0 人）"), chinese.toString());
+        CPConfig.language = "fr";
+        final List<String> custom = this.run(Type.STATUS, null);
+        assertTrue(custom.contains("Joueurs : 0"), custom.toString());
+        assertTrue(custom.contains("    Players in lobby (0)"), custom.toString());
+        CPConfig.language = "auto";
+        assertTrue(this.run(Type.STATUS, null).contains("Custom total: 0"), "A console without a locale falls back to English");
+        assertTrue(Files.readString(languages.resolve("en.yml")).startsWith(oldEnglish));
+        assertTrue(Files.readString(languages.resolve("zh.yml")).startsWith(oldChinese));
+    }
+
+    @Test
     void statusWorksWithoutALobbyAndReportsDisabledParts() throws Exception {
         final String oldMode = CPConfig.mode;
         CPConfig.mode = "proxy";
@@ -199,7 +278,7 @@ class ConsoleCommandServiceTest {
         assertTrue(joined.contains("proxy"), "The configured mode is shown: " + joined);
         assertTrue(joined.contains("未启用"), "The disabled lobby is labelled: " + joined);
         assertTrue(joined.contains("25565"), "The host listen address is shown: " + joined);
-        assertTrue(joined.contains("未注册"), "The unregistered bridge is labelled: " + joined);
+        assertTrue(out.contains("Geyser桥接插件: 未注册"), "The unregistered bridge is labelled: " + joined);
         } finally {
             CPConfig.mode = oldMode;
         }
@@ -214,15 +293,14 @@ class ConsoleCommandServiceTest {
         final boolean oldGeyser = CPConfig.GeyserSupport.enabled;
         CPConfig.GeyserSupport.enabled = true;
         this.endpoint.register(Map.of("protocolVersion", 1, "providerId", BedrockBridgeEndpoint.PROVIDER_ID,
-                "providerEpoch", epoch, "bridgeVersion", "1.0.0", "geyserVersion", "2.11.3",
+                "providerEpoch", epoch, "bridgeVersion", "1.0.2", "geyserVersion", "2.11.3-b1249 (git-master-f66329d)",
                 "viaproxyVersion", "3.4.13", "capabilities", List.copyOf(BedrockBridgeEndpoint.REQUIRED_CAPABILITIES)),
                 request -> java.util.concurrent.CompletableFuture.completedFuture(Map.of()));
         try {
             final List<String> out = this.run(Type.STATUS, null);
             final String joined = String.join("\n", out);
             assertTrue(joined.contains("lobby"), "The configured mode is shown: " + joined);
-            assertTrue(joined.contains("1.0.0"), "The bridge version is shown: " + joined);
-            assertTrue(joined.contains("2.11.3"), "The bridge's Geyser version is shown: " + joined);
+            assertTrue(out.contains("Geyser桥接插件: 已注册 (桥接插件版本 1.0.2, Geyser 版本 2.11.3-b1249 (git-master-f66329d))"), joined);
         } finally {
             CPConfig.GeyserSupport.enabled = oldGeyser;
             CPConfig.mode = oldMode;
@@ -232,7 +310,46 @@ class ConsoleCommandServiceTest {
     // ---- list ------------------------------------------------------------
 
     @Test
-    void listShowsLobbySessionsWithLoginStatusPriority() throws Exception {
+    void statusUsesTheSameOnlineGroupsAsListWithoutPlayerDetails() throws Exception {
+        final var players = List.of(
+                new OnlinePlayerQuery.Player(UUID.randomUUID(), "LobbyOnlyName", UUID.randomUUID(), null,
+                        "Java 1.20.2", OnlinePlayerQuery.Location.LOBBY, null, null, null),
+                new OnlinePlayerQuery.Player(UUID.randomUUID(), "ServerOnlyName", UUID.randomUUID(), null,
+                        "基岩 1.21.50", OnlinePlayerQuery.Location.SERVER, "private.example.com:25565", "1.21.4", null),
+                new OnlinePlayerQuery.Player(UUID.randomUUID(), "AnotherServerName", UUID.randomUUID(), null,
+                        "Java 1.20.2", OnlinePlayerQuery.Location.SERVER, "private.example.com:25565", "1.21.4", null),
+                new OnlinePlayerQuery.Player(UUID.randomUUID(), "SwitchingOnlyName", UUID.randomUUID(), null,
+                        "Java 1.20.2", OnlinePlayerQuery.Location.SWITCHING, null, null, null));
+        final ConsoleCommandService service = this.service(() -> new OnlinePlayerQuery.Snapshot(players, true));
+        final List<String> status = service.execute(new Command(Type.STATUS, null)).toCompletableFuture().get(10, TimeUnit.SECONDS);
+        final List<String> list = service.execute(new Command(Type.LIST, null)).toCompletableFuture().get(10, TimeUnit.SECONDS);
+        assertTrue(status.contains("当前在线：4 人"), status.toString());
+        assertTrue(list.contains("当前在线：4 人"), list.toString());
+        for (final String count : List.of("大厅中的玩家（1 人）", "已连接其他服务器的玩家（2 人）", "切服中的玩家（1 人）")) {
+            assertTrue(status.contains("    " + count), status.toString());
+            assertTrue(list.contains(count), list.toString());
+        }
+        assertTrue(status.contains("    目标服务器在途连接: 未启用"), status.toString());
+        final String joined = String.join("\n", status);
+        assertFalse(joined.contains("大厅会话数") || joined.contains("private.example.com") || joined.contains("客户端版本："), joined);
+        for (final var player : players) assertFalse(joined.contains(player.name()), joined);
+    }
+
+    @Test
+    void statusShowsEmptyGroupCountsAndPreservesUnavailableQueryNotice() throws Exception {
+        final ConsoleCommandService empty = this.service(() -> new OnlinePlayerQuery.Snapshot(List.of(), true));
+        final List<String> status = empty.execute(new Command(Type.STATUS, null)).toCompletableFuture().get(10, TimeUnit.SECONDS);
+        assertTrue(status.contains("当前在线：0 人"), status.toString());
+        assertTrue(status.contains("    大厅中的玩家（0 人）"), status.toString());
+        assertTrue(status.contains("    已连接其他服务器的玩家（0 人）"), status.toString());
+        assertFalse(status.stream().anyMatch(line -> line.contains("暂无玩家")), status.toString());
+        final ConsoleCommandService unavailable = this.service(() -> new OnlinePlayerQuery.Snapshot(List.of(), false));
+        final List<String> failed = unavailable.execute(new Command(Type.STATUS, null)).toCompletableFuture().get(10, TimeUnit.SECONDS);
+        assertTrue(failed.stream().anyMatch(line -> line.contains("部分连接状态不可用")), failed.toString());
+    }
+
+    @Test
+    void listGroupsLobbyPlayersAndShowsOnlyClientVersions() throws Exception {
         this.lobby();
 
         final PlayerSession idle = new PlayerSession(UUID.nameUUIDFromBytes("a".getBytes(StandardCharsets.UTF_8)), "Zeta");
@@ -241,6 +358,8 @@ class ConsoleCommandServiceTest {
         final PlayerSession loggingIn = new PlayerSession(UUID.nameUUIDFromBytes("c".getBytes(StandardCharsets.UTF_8)), "Mike");
         loggingIn.account = new StubAccount();
         loggingIn.loginInProgress = true;
+        idle.clientVersion = com.viaversion.viaversion.api.protocol.version.ProtocolVersion.v1_20;
+        loggedIn.clientVersion = com.viaversion.viaversion.api.protocol.version.ProtocolVersion.v1_20_2;
 
         idle.connectionId = UUID.randomUUID();
         loggedIn.connectionId = UUID.randomUUID();
@@ -250,13 +369,112 @@ class ConsoleCommandServiceTest {
         this.lobby().register(loggingIn);
 
         final List<String> out = this.run(Type.LIST, null);
-        assertEquals(3, out.size(), "Exactly the three lobby sessions are listed, sorted by name");
-        assertTrue(out.get(0).startsWith("Alpha") && out.get(0).contains("已登录"), out.get(0));
-        assertTrue(out.get(1).startsWith("Mike") && out.get(1).contains("登录中"), out.get(1));
-        assertTrue(out.get(2).startsWith("Zeta") && out.get(2).contains("未登录"), out.get(2));
+        final String joined = String.join("\n", out);
+        assertTrue(joined.contains("大厅中的玩家（3 人）"), joined);
+        assertTrue(joined.contains("已连接其他服务器的玩家（0 人）"), joined);
+        assertTrue(joined.contains("Alpha | 客户端版本：Java 1.20.2"), joined);
+        assertTrue(joined.contains("Zeta | 客户端版本：Java 1.20-1.20.1"), joined);
+        assertTrue(joined.indexOf("Alpha") < joined.indexOf("Mike") && joined.indexOf("Mike") < joined.indexOf("Zeta"), joined);
+        assertFalse(joined.contains("微软") || joined.contains("后端") || joined.contains("登录中"), joined);
     }
 
     // ---- links -----------------------------------------------------------
+
+    @Test
+    void listHidesAddressesWhileInfoFollowsCurrentServerAcrossSwitchesAndDisconnects() throws Exception {
+        this.lobby();
+        final AccessConnectionRegistry connections = new AccessConnectionRegistry();
+        final OnlinePlayerQuery query = new OnlinePlayerQuery(() -> connections, () -> this.lobbyServer);
+        final UUID uuid = UUID.randomUUID();
+        final ClientIdentity identity = ClientIdentity.verifiedJava(uuid, "Traveler", uuid);
+        this.visits.recordVisit(uuid, "Traveler", identity);
+        final ConsoleCommandService service = this.service(query::snapshot);
+        try (final OnlineConnection pc = new OnlineConnection(connections,
+                new AccessSubject(AccessKey.ClientType.JAVA, "Traveler", uuid, null), identity, ProtocolVersion.v1_20_2)) {
+            final PlayerSession session = new PlayerSession(uuid, "Traveler");
+            session.connectionId = pc.connectionId;
+            session.c2pChannel = pc.client;
+            session.lobbyChannel = pc.backend;
+            pc.client.attr(dev.connectplus.compat.CPAttributeKeys.LOBBY_SESSION).set(session);
+            this.registry.register(session);
+            pc.address = this.lobbyServer.localAddress();
+            pc.setP2sConnectionState(net.raphimc.netminecraft.constants.ConnectionState.LOGIN);
+            final String joining = String.join("\n", service.execute(new Command(Type.LIST, null)).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(joining.contains("大厅中的玩家（0 人）") && joining.contains("切服中的玩家（1 人）"), joining);
+            pc.setP2sConnectionState(net.raphimc.netminecraft.constants.ConnectionState.PLAY);
+            String list = String.join("\n", service.execute(new Command(Type.LIST, null)).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(list.contains("大厅中的玩家（1 人）"), list);
+            assertTrue(list.contains("已连接其他服务器的玩家（0 人）"), list);
+            final String lobbyInfo = String.join("\n", service.execute(new Command(Type.INFO, "Traveler")).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertFalse(lobbyInfo.contains("当前服务器"), lobbyInfo);
+            assertFalse(lobbyInfo.contains("服务器版本"), lobbyInfo);
+            assertFalse(list.contains("服务器版本"), list);
+
+            this.registry.release(session, session.generation);
+            pc.address = InetSocketAddress.createUnresolved("private.example.com", 25565);
+            pc.serverVersion = ProtocolVersion.v1_21_4;
+            list = String.join("\n", service.execute(new Command(Type.LIST, null)).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(list.contains("大厅中的玩家（0 人）"), list);
+            assertTrue(list.contains("已连接其他服务器的玩家（1 人）"), list);
+            assertEquals(1, list.lines().filter(line -> line.contains("Traveler")).count(), list);
+            assertTrue(list.contains("Traveler | 客户端版本：Java 1.20.2 | 服务器版本：1.21.4"), list);
+            assertFalse(list.contains("private.example.com") || list.contains("25565") || list.contains("微软") || list.contains("后端"), list);
+            final String info = String.join("\n", service.execute(new Command(Type.INFO, "traveler")).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(info.contains("Traveler [在线]") && info.contains("当前位置：其他服务器（服务器版本：1.21.4）"), info);
+            assertTrue(info.contains("当前服务器：private.example.com:25565"), info);
+
+            pc.serverVersion = null;
+            final String unknown = String.join("\n", service.execute(new Command(Type.INFO, "Traveler")).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(unknown.contains("当前位置：其他服务器（服务器版本：未知）"), unknown);
+            assertTrue(unknown.contains("客户端：Java 1.20.2"), unknown);
+
+            pc.address = this.lobbyServer.localAddress();
+            this.registry.register(session);
+            list = String.join("\n", service.execute(new Command(Type.LIST, null)).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(list.contains("大厅中的玩家（1 人）") && list.contains("已连接其他服务器的玩家（0 人）"), list);
+            final String returned = String.join("\n", service.execute(new Command(Type.INFO, "Traveler")).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertFalse(returned.contains("当前服务器"), returned);
+            assertFalse(returned.contains("服务器版本"), returned);
+
+            pc.client.close();
+            list = String.join("\n", service.execute(new Command(Type.LIST, null)).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertFalse(list.contains("Traveler"), list);
+            final String after = String.join("\n", service.execute(new Command(Type.INFO, "Traveler")).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(after.contains("Traveler [离线]"), after);
+            assertFalse(after.contains("当前服务器"), after);
+        }
+    }
+
+    @Test
+    void infoFindsBackendPlayerByOldNameWithoutBorrowingTheStatusOfALinkedAccount() throws Exception {
+        final AccessConnectionRegistry connections = new AccessConnectionRegistry();
+        final OnlinePlayerQuery query = new OnlinePlayerQuery(() -> connections, () -> null);
+        final UUID java = UUID.randomUUID();
+        final UUID wire = UUID.randomUUID();
+        final String xuid = "2535429616021489";
+        this.visits.recordKnownJavaName(java, "OldName");
+        this.visits.recordVisit(wire, "LinkedBedrock", ClientIdentity.verifiedBedrock(wire, "LinkedBedrock", xuid, UUID.randomUUID(), "s"));
+        this.linkStore.replace(0, Map.of(xuid, java));
+        try (final OnlineConnection pc = new OnlineConnection(connections,
+                new AccessSubject(AccessKey.ClientType.JAVA, "CurrentName", java, null),
+                ClientIdentity.verifiedJava(java, "CurrentName", java), ProtocolVersion.v1_20_2)) {
+            final ConsoleCommandService service = this.service(query::snapshot);
+            final String javaInfo = String.join("\n", service.execute(new Command(Type.INFO, "OldName")).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(javaInfo.contains("CurrentName [在线]") && javaInfo.contains("当前位置：其他服务器"), javaInfo);
+            final String bedrockInfo = String.join("\n", service.execute(new Command(Type.INFO, "LinkedBedrock")).toCompletableFuture().get(10, TimeUnit.SECONDS));
+            assertTrue(bedrockInfo.contains("LinkedBedrock [离线]"), bedrockInfo);
+        }
+    }
+
+    @Test
+    void failedOnlineQueryDoesNotReportHistoricalPlayersAsOffline() throws Exception {
+        final UUID uuid = UUID.randomUUID();
+        this.visits.recordKnownJavaName(uuid, "MaybeOnline");
+        final ConsoleCommandService service = this.service(() -> { throw new IllegalStateException("host unavailable"); });
+        final String info = String.join("\n", service.execute(new Command(Type.INFO, "MaybeOnline")).toCompletableFuture().get(10, TimeUnit.SECONDS));
+        assertTrue(info.contains("MaybeOnline [在线状态不可用]"), info);
+        assertFalse(info.contains("[离线]"), info);
+    }
 
     @Test
     void linksListsTheCommittedSnapshot() throws Exception {
@@ -303,7 +521,7 @@ class ConsoleCommandServiceTest {
         this.linkStore.replace(0, Map.of(xuid, java));
         final PlayerSession session = onlineIdentity("JavaPlayer", ClientIdentity.verifiedJava(java, "JavaPlayer", java), ProfileKey.javaProfile(java));
         try {
-            assertEquals(List.of("JavaPlayer [在线]", "  JavaUUID: " + java, "  书签数: 0",
+            assertEquals(List.of("JavaPlayer [在线]", "  当前位置：大厅", "  客户端：Java（版本未知）", "  JavaUUID: " + java, "  书签数: 0",
                     "  关联: 已关联 ← Bedrock Player(XUID: " + xuid + ")",
                     "  是否在白名单：否", "  是否在黑名单：否",
                     "  已绑定账号：Bedrock Player", "    平台：基岩",
@@ -321,7 +539,7 @@ class ConsoleCommandServiceTest {
         this.linkStore.replace(0, Map.of(xuid, java));
         final PlayerSession session = onlineIdentity("Bedrock Player", ClientIdentity.verifiedBedrock(wire, "Bedrock Player", xuid, UUID.randomUUID(), "s"), ProfileKey.javaProfile(java));
         try {
-            assertEquals(List.of("Bedrock Player [在线]", "  XUID: " + xuid, "  书签数: 0",
+            assertEquals(List.of("Bedrock Player [在线]", "  当前位置：大厅", "  客户端：基岩（版本未知）", "  XUID: " + xuid, "  书签数: 0",
                     "  关联: 已关联 → KnownJavaName(JavaUUID: " + java + ")",
                     "  是否在白名单：否", "  是否在黑名单：否",
                     "  已绑定账号：KnownJavaName", "    平台：Java",
@@ -479,7 +697,7 @@ class ConsoleCommandServiceTest {
         this.visits.recordKnownJavaName(java, "OldName");
         final PlayerSession session = onlineIdentity("CurrentName", ClientIdentity.verifiedJava(java, "CurrentName", java), ProfileKey.javaProfile(java));
         try {
-            assertEquals(List.of("CurrentName [在线]", "  JavaUUID: " + java, "  书签数: 0", "  关联: 未关联",
+            assertEquals(List.of("CurrentName [在线]", "  当前位置：大厅", "  客户端：Java（版本未知）", "  JavaUUID: " + java, "  书签数: 0", "  关联: 未关联",
                     "  是否在白名单：否", "  是否在黑名单：否", "  绑定账号：未绑定"), this.run(Type.INFO, "OldName"));
         } finally { session.c2pChannel.close(); }
     }
@@ -528,8 +746,8 @@ class ConsoleCommandServiceTest {
         final int onlineHeader = output.indexOf("SameName [在线]");
         final int offlineHeader = output.indexOf("SameName [离线]");
         assertTrue(onlineHeader >= 0 && onlineHeader < offlineHeader, String.join("\n", output));
-        assertEquals("  协议UUID: " + wire + " (身份未确认)", output.get(onlineHeader + 1));
-        assertTrue(output.get(onlineHeader + 2).contains("不可用"));
+        assertEquals("  协议UUID: " + wire + " (身份未确认)", output.get(onlineHeader + 3));
+        assertTrue(output.get(onlineHeader + 4).contains("不可用"));
         // The offline KNOWN-NAME match keeps its lines after the online block.
         assertEquals("  JavaUUID: " + java, output.get(offlineHeader + 1));
         assertFalse(this.playerStore.exists(ProfileKey.javaProfile(java)));
@@ -721,7 +939,7 @@ class ConsoleCommandServiceTest {
                 () -> this.visits,
                 accessConsoleStub(),
                 access,
-                this.executor);
+                this.executor, this::lobbySnapshot);
 
         final String out = String.join("\n", lateBindingService.execute(
                 new Command(Type.INFO, "B")).toCompletableFuture().get(10, TimeUnit.SECONDS));

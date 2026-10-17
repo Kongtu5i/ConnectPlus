@@ -53,6 +53,14 @@ class LanguagesTest {
     }
 
     @Test
+    void consoleTemplatesPreserveLiteralArgumentsAndCustomPlaceholderOrder() {
+        Languages.putPackForTests("custom", Map.of("Console.PlayerLine", "{1}: {0} / {0}{2} / {7}"));
+        withLanguage("custom", () -> assertEquals(
+                "Bedrock 1.21.50: Player{1}$\\name / Player{1}$\\name | server / {7}",
+                Languages.consoleText(Messages.Console.PlayerLine, "Player{1}$\\name", "Bedrock 1.21.50", " | server")));
+    }
+
+    @Test
     void customLanguageFileIsPickedUp() throws IOException {
         final File dir = new File(this.dataDir, "languages");
         assertTrue(dir.mkdirs());

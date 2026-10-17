@@ -85,6 +85,40 @@ public final class ViaProxyCompat {
         ViaProxy.EVENT_MANAGER.unregister(listener);
     }
 
+    /** Optional Geyser public API; no hard dependency on the installed Geyser version. */
+    public static @Nullable String bedrockClientVersion(final java.util.UUID wireUuid, final String xuid) {
+        try {
+            final var manager = ViaProxy.getPluginManager();
+            if (manager == null) return null;
+            for (final var hostPlugin : manager.getPlugins()) {
+                if (!hostPlugin.getName().equalsIgnoreCase("Geyser-ViaProxy")
+                        && !hostPlugin.getClass().getName().startsWith("org.geysermc.geyser.")) continue;
+                return bedrockClientVersion(hostPlugin.getClass().getClassLoader(), wireUuid, xuid);
+            }
+        } catch (final RuntimeException | LinkageError unavailable) {
+            return null;
+        }
+        return null;
+    }
+
+    static @Nullable String bedrockClientVersion(final ClassLoader loader, final java.util.UUID wireUuid, final String xuid) {
+        try {
+            final Class<?> apiType = Class.forName("org.geysermc.geyser.api.GeyserApi", true, loader);
+            final Object api = apiType.getMethod("api").invoke(null);
+            if (api == null) return null;
+            final Object connection = xuid != null
+                    ? apiType.getMethod("connectionByXuid", String.class).invoke(api, xuid)
+                    : wireUuid != null ? apiType.getMethod("connectionByUuid", java.util.UUID.class).invoke(api, wireUuid) : null;
+            if (connection == null) return null;
+            final Class<?> connectionType = Class.forName("org.geysermc.geyser.api.connection.GeyserConnection", true, loader);
+            if (wireUuid != null && !wireUuid.equals(connectionType.getMethod("javaUuid").invoke(connection))) return null;
+            final Object version = connectionType.getMethod("version").invoke(connection);
+            return version instanceof String text && !text.isBlank() ? text : null;
+        } catch (final ReflectiveOperationException | RuntimeException | LinkageError unavailable) {
+            return null;
+        }
+    }
+
     /** True only when public host metadata proves there is no Geyser transport. */
     public static boolean isJavaOnlyHost() {
         try {
