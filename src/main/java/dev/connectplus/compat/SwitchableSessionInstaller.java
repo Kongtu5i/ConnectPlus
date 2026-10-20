@@ -55,6 +55,7 @@ public class SwitchableSessionInstaller {
             suppressionRef.set(suppression);
             replacement.getPacketHandlers().add(suppression);
         }
+        replacement.getPacketHandlers().add(new LobbyServerDataHandler(replacement));
         event.setProxySession(replacement);
     }
 
