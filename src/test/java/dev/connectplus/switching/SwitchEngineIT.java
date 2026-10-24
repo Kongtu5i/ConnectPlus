@@ -345,10 +345,15 @@ class SwitchEngineIT {
 
     @Test
     @Timeout(20)
-    void configurationBackendWaitsForPongBeforeAllowingTheSwitchToComplete() throws Exception {
+    void configurationBackendReceivesSavedSettingsAndPongBeforeAllowingTheSwitchToComplete() throws Exception {
         this.pc = this.connectToOriginLobby();
+        // Report settings to the original lobby once. No client settings packet
+        // is sent during the later switch: CP must replay it over the new socket.
+        final byte[] settings = {5, 'z', 'h', '_', 'c', 'n', 12, 0, 1, 127, 1, 0, 1, 0};
+        this.driveToP2s(new UnknownPacket(MCPackets.C2S_CLIENT_INFORMATION.getId(769), settings));
         final byte[] ping = {0x12, 0x34, 0x56, 0x78};
         final java.util.concurrent.atomic.AtomicBoolean pongReceived = new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean settingsReceived = new java.util.concurrent.atomic.AtomicBoolean();
         final java.util.concurrent.atomic.AtomicReference<Throwable> backendError = new java.util.concurrent.atomic.AtomicReference<>();
         final java.util.Set<Channel> backendChannels = java.util.concurrent.ConcurrentHashMap.newKeySet();
         final net.raphimc.netminecraft.netty.connection.NetServer backend = new net.raphimc.netminecraft.netty.connection.NetServer(
@@ -367,9 +372,15 @@ class SwitchEngineIT {
                         } else if (packet instanceof UnknownPacket pong && pong.packetId == 5) {
                             org.junit.jupiter.api.Assertions.assertArrayEquals(ping, pong.data);
                             pongReceived.set(true);
-                            ctx.writeAndFlush(new S2CConfigFinishConfigurationPacket());
+                            if (settingsReceived.get()) ctx.writeAndFlush(new S2CConfigFinishConfigurationPacket());
+                        } else if (packet instanceof UnknownPacket information
+                                && information.packetId == MCPackets.C2S_CONFIG_CLIENT_INFORMATION.getId(769)) {
+                            org.junit.jupiter.api.Assertions.assertArrayEquals(settings, information.data);
+                            settingsReceived.set(true);
+                            if (pongReceived.get()) ctx.writeAndFlush(new S2CConfigFinishConfigurationPacket());
                         } else if (packet instanceof C2SConfigFinishConfigurationPacket) {
                             assertTrue(pongReceived.get());
+                            assertTrue(settingsReceived.get());
                             registry.setConnectionState(ConnectionState.PLAY);
                             ctx.writeAndFlush(dev.connectplus.testutil.ModernWorldPackets.join(769));
                             ctx.writeAndFlush(new UnknownPacket(MCPackets.S2C_PLAYER_ABILITIES.getId(769),
@@ -397,6 +408,7 @@ class SwitchEngineIT {
             assertEquals(SwitchInitiator.StartResult.STARTED, this.engine.startSwitch(this.pc, target, null, PLAYER_NAME));
             this.awaitJoinGameOnClient();
             assertTrue(pongReceived.get(), "The backend must receive its pong over the real socket");
+            assertTrue(settingsReceived.get(), "The target must receive the original view distance without a client resend");
             org.junit.jupiter.api.Assertions.assertNull(backendError.get());
             assertEquals(ConnectionState.PLAY, this.pc.getP2sConnectionState());
             assertEquals(ConnectionState.PLAY, this.pc.getC2pConnectionState());
