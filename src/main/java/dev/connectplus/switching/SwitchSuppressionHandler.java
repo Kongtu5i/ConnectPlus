@@ -102,6 +102,7 @@ public class SwitchSuppressionHandler extends PacketHandler {
     private final Owner owner;
     private final TabListState tabList = new TabListState();
     private final ScoreboardState scoreboard = new ScoreboardState();
+    private final WaypointState waypoints = new WaypointState();
 
     public SwitchSuppressionHandler(final ProxyConnection proxyConnection, final Owner owner) {
         super(proxyConnection);
@@ -525,6 +526,12 @@ public class SwitchSuppressionHandler extends PacketHandler {
                     final boolean legacy = this.proxyConnection.getClientVersion().olderThan(ProtocolVersion.v1_9);
                     final ChannelFutureListener[] writeListeners = listeners.toArray(new ChannelFutureListener[0]);
                     this.onClientLoop(() -> {
+                        // Locator markers survive world changes independently of
+                        // player profiles, including markers with string sources.
+                        for (final UnknownPacket remove : this.waypoints.clear(clientVersion)) {
+                            this.proxyConnection.getC2P().writeAndFlush(remove)
+                                    .addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
+                        }
                         for (final UnknownPacket remove : this.scoreboard.clear(clientVersion)) {
                             this.proxyConnection.getC2P().writeAndFlush(remove)
                                     .addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
@@ -659,7 +666,8 @@ public class SwitchSuppressionHandler extends PacketHandler {
                 || protocol.getVersionType() != com.viaversion.viaversion.api.protocol.version.VersionType.RELEASE
                 || protocol.isSnapshot() || !(packet instanceof UnknownPacket raw)
                 || !(TabListState.isPlayerList(raw, protocol.getOriginalVersion())
-                    || ScoreboardState.isScoreboard(raw, protocol.getOriginalVersion()))) return true;
+                    || ScoreboardState.isScoreboard(raw, protocol.getOriginalVersion())
+                    || WaypointState.isWaypoint(raw, protocol.getOriginalVersion()))) return true;
         try {
             if (!this.runRemainingHandlers(packet, listeners)) return false;
         } catch (Exception e) {
@@ -669,7 +677,8 @@ public class SwitchSuppressionHandler extends PacketHandler {
         this.onClientLoop(() -> {
             try {
                 if (TabListState.isPlayerList(raw, protocol.getOriginalVersion())) this.tabList.observe(raw, protocol.getOriginalVersion());
-                else this.scoreboard.observe(raw, protocol.getOriginalVersion());
+                else if (ScoreboardState.isScoreboard(raw, protocol.getOriginalVersion())) this.scoreboard.observe(raw, protocol.getOriginalVersion());
+                else this.waypoints.observe(raw);
             } catch (RuntimeException e) {
                 // A malformed/unknown body remains native client traffic. Never
                 // invent an ID, partially mutate the tracker or alter its packet.
