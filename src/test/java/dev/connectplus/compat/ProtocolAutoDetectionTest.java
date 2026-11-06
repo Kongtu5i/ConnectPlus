@@ -21,8 +21,38 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ProtocolAutoDetectionTest {
-    @ParameterizedTest @ValueSource(ints = {575, 578}) @Timeout(15)
-    void velocityEchoDoesNotMistakeTheOldClientForTheTargetVersion(int clientProtocol) {
+    @org.junit.jupiter.api.Test @Timeout(15)
+    void newClientDetectsAnOlderVanillaServer() {
+        assertEquals(765, probeFixture(ProtocolVersion.v26_3.getOriginalVersion(), requested -> 765));
+    }
+
+    @org.junit.jupiter.api.Test @Timeout(value = 10, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void rejectedNewClientProbeStillDetectsTheOlderServer() {
+        assertEquals(765, probeFixture(ProtocolVersion.v26_3.getOriginalVersion(),
+                requested -> requested < 0 ? 765 : null),
+                "Rejecting the client-version status handshake must not prevent independent detection");
+    }
+
+    @org.junit.jupiter.api.Test @Timeout(value = 8, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void silentClientProbeTimesOutBeforeIndependentDetection() {
+        assertEquals(765, probeFixture(777, requested -> requested < 0 ? 765 : null,
+                false, "Status fixture", false));
+    }
+
+    @org.junit.jupiter.api.Test @Timeout(value = 10, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void failedProbesNeverInventAServerVersion() {
+        assertThrows(RuntimeException.class, () -> probeFixture(ProtocolVersion.v26_3.getOriginalVersion(),
+                requested -> null));
+    }
+
+    @org.junit.jupiter.api.Test @Timeout(value = 10, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void invalidIndependentResponseCannotRecoverAFailedClientProbe() {
+        assertThrows(RuntimeException.class, () -> probeFixture(ProtocolVersion.v26_3.getOriginalVersion(),
+                requested -> requested < 0 ? -1 : null));
+    }
+
+    @ParameterizedTest @ValueSource(ints = {575, 578, 777}) @Timeout(15)
+    void velocityEchoDoesNotMistakeTheClientForTheTargetVersion(int clientProtocol) {
         assertEquals(765, probeFixture(clientProtocol, requested -> requested < 0 ? 765 : requested),
                 "Velocity mirrors supported clients but exposes its maximum for an unknown status protocol");
     }
@@ -47,12 +77,32 @@ class ProtocolAutoDetectionTest {
         assertEquals(765, probeFixture(578, requested -> requested < 0 ? 765 : requested, true));
     }
 
+    @org.junit.jupiter.api.Test @Timeout(15)
+    void unregisteredProtocolRetainsTheHostsVersionNameFallback() {
+        assertEquals(765, probeFixture(777, requested -> 999999, false, "Velocity 1.7.2-1.20.4"));
+    }
+
+    @org.junit.jupiter.api.Test @Timeout(15)
+    void unregisteredProtocolWithoutARecognizableNameFailsDetection() {
+        assertThrows(RuntimeException.class, () -> probeFixture(777, requested -> 999999));
+    }
+
     private int probeFixture(int clientProtocol, java.util.function.IntFunction<Integer> response) {
         return probeFixture(clientProtocol, response, false);
     }
 
     private int probeFixture(int clientProtocol, java.util.function.IntFunction<Integer> response,
                              boolean closeAfterIndependentStatus) {
+        return probeFixture(clientProtocol, response, closeAfterIndependentStatus, "Status fixture");
+    }
+
+    private int probeFixture(int clientProtocol, java.util.function.IntFunction<Integer> response,
+                             boolean closeAfterIndependentStatus, String versionName) {
+        return probeFixture(clientProtocol, response, closeAfterIndependentStatus, versionName, true);
+    }
+
+    private int probeFixture(int clientProtocol, java.util.function.IntFunction<Integer> response,
+                             boolean closeAfterIndependentStatus, String versionName, boolean closeRejectedStatus) {
         dev.connectplus.testutil.ViaProxyTestConfig.init();
         final Set<Channel> children = ConcurrentHashMap.newKeySet();
         final NetServer server = new NetServer(new MinecraftChannelInitializer(() -> new SimpleChannelInboundHandler<Packet>() {
@@ -65,8 +115,11 @@ class ProtocolAutoDetectionTest {
                             .setConnectionState(handshake.intendedState.getConnectionState());
                 } else if (packet instanceof C2SStatusRequestPacket) {
                     final Integer protocol = response.apply(requestedProtocol);
-                    if (protocol == null) { ctx.close(); return; }
-                    ctx.writeAndFlush(new S2CStatusResponsePacket("{\"version\":{\"name\":\"Status fixture\",\"protocol\":"
+                    if (protocol == null) {
+                        if (closeRejectedStatus) ctx.close();
+                        return;
+                    }
+                    ctx.writeAndFlush(new S2CStatusResponsePacket("{\"version\":{\"name\":\"" + versionName + "\",\"protocol\":"
                             + protocol + "},\"players\":{\"max\":20,\"online\":0},\"description\":{\"text\":\"test\"}}"))
                             .addListener(f -> { if (requestedProtocol < 0 && closeAfterIndependentStatus) ctx.close(); });
                 } else if (packet instanceof C2SStatusPingRequestPacket ping) {
@@ -90,7 +143,7 @@ class ProtocolAutoDetectionTest {
     }
 
     @ParameterizedTest @ValueSource(ints = {758, 765, 769, 774}) @Timeout(15)
-    void theOfficialProbeUsesTheServersAdvertisedVersionRatherThanTheClientVersion(int serverProtocol) {
+    void detectionUsesTheServersAdvertisedVersionRatherThanTheClientVersion(int serverProtocol) {
         dev.connectplus.testutil.ViaProxyTestConfig.init();
         final Set<Channel> children = ConcurrentHashMap.newKeySet();
         final AtomicInteger requests = new AtomicInteger();

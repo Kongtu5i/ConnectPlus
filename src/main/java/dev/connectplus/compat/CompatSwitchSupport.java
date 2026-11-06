@@ -20,6 +20,7 @@ import net.raphimc.viaproxy.ViaProxy;
 import net.raphimc.viaproxy.protocoltranslator.ProtocolTranslator;
 
 import java.net.SocketAddress;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
@@ -76,10 +77,15 @@ public final class CompatSwitchSupport {
     }
 
     /**
-     * Resolves the protocol version of a target server by a short status ping
-     * (ViaProxy's auto detect); throws a runtime exception on failure.
+     * Resolves the protocol version of a target server by a short status query;
+     * throws a runtime exception on failure.
      *
-     * <p>ViaProxy moved this helper between releases (3.4.13:
+     * <p>TCP queries use a regular socket: the host's MCPing SocketChannel reader
+     * can spin on EOF instead of respecting its read timeout when a server closes
+     * the status connection. Never block the switch on that reader for TCP targets.
+     * Non-TCP addresses retain the host's transport support.</p>
+     *
+     * <p>ViaProxy moved its helper between releases (3.4.13:
      * {@code ProtocolVersionDetector.get}, sync; 3.4.14: removed,
      * {@code StatusPingUtil.detectProtocolVersion}, async-future), so the call
      * goes through the 3.4.13 name first and reflectively falls back to the
@@ -88,8 +94,14 @@ public final class CompatSwitchSupport {
      * deployment finding).</p>
      */
     public static ProtocolVersion detectProtocolVersion(final SocketAddress address, final ProtocolVersion clientVersion) {
-        final ProtocolVersion advertised = detectAdvertisedProtocol(address, clientVersion);
-        if (advertised.getOriginalVersion() != clientVersion.getOriginalVersion()) return advertised;
+        ProtocolVersion advertised = null;
+        RuntimeException probeFailure = null;
+        try {
+            advertised = detectAdvertisedProtocol(address, clientVersion);
+        } catch (final RuntimeException failedClientProbe) {
+            probeFailure = failedClientProbe;
+        }
+        if (advertised != null && advertised.getOriginalVersion() != clientVersion.getOriginalVersion()) return advertised;
 
         // Velocity's local status response echoes any supported querying client.
         // An unknown status protocol asks it to advertise its maximum instead.
@@ -104,13 +116,38 @@ public final class CompatSwitchSupport {
                 if (!isAutomaticVersion(independent)) return independent;
             }
         } catch (final RuntimeException unsupportedProbe) {
-            // Some servers reject unknown status handshakes. Their successful
-            // original response remains usable; never invent a fallback version.
+            if (probeFailure != null) probeFailure.addSuppressed(unsupportedProbe);
         }
-        return advertised;
+        // Some servers reject unknown status handshakes. Keep a successful
+        // original response, or report its failure; never invent a version.
+        if (advertised != null) return advertised;
+        throw probeFailure;
     }
 
     private static ProtocolVersion detectAdvertisedProtocol(final SocketAddress address, final ProtocolVersion probeVersion) {
+        if (address instanceof InetSocketAddress) {
+            final var response = MCPing.pingModern(probeVersion.getOriginalVersion(), true)
+                    .tcpSocketFactory(new TCPSocketFactory())
+                    .address(address).noResolve().timeout(3000, 3000).getSync();
+            if (response == null || response.version == null) {
+                throw new IllegalStateException("Protocol auto detection returned no server version");
+            }
+            if (response.version.protocol == probeVersion.getOriginalVersion()) return probeVersion;
+            if (ProtocolVersion.isRegistered(response.version.protocol)) {
+                return ProtocolVersion.getProtocol(response.version.protocol);
+            }
+            // Match the host's fallback for servers advertising a version name
+            // instead of a registered protocol number (e.g. legacy servers).
+            if (response.version.name != null) {
+                for (final ProtocolVersion version : ProtocolVersion.getReversedProtocols()) {
+                    for (final String name : version.getIncludedVersions()) {
+                        if (response.version.name.contains(name)) return version;
+                    }
+                }
+            }
+            throw new IllegalStateException("Unable to detect the server version: "
+                    + response.version.protocol + " (" + response.version.name + ")");
+        }
         try {
             return ProtocolVersionDetector.get(address, probeVersion);
         } catch (final NoSuchMethodError | NoClassDefFoundError legacyRemoved) {
