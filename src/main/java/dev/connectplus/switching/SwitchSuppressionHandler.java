@@ -2,6 +2,8 @@ package dev.connectplus.switching;
 
 import dev.connectplus.logging.DebugLog;
 import dev.connectplus.compat.AccountLoginPolicy;
+import dev.connectplus.compat.CPAttributeKeys;
+import dev.connectplus.identity.ClientIdentity;
 
 import com.viaversion.viaversion.api.protocol.version.ProtocolVersion;
 import dev.connectplus.CoreMain;
@@ -43,6 +45,7 @@ import net.raphimc.vialegacy.protocol.release.r1_6_4tor1_7_2_5.storage.ProtocolM
 
 import javax.annotation.Nullable;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -103,6 +106,7 @@ public class SwitchSuppressionHandler extends PacketHandler {
     private final TabListState tabList = new TabListState();
     private final ScoreboardState scoreboard = new ScoreboardState();
     private final WaypointState waypoints = new WaypointState();
+    private @Nullable UUID mirroredSkinSource; // Only accessed on the client event loop.
 
     public SwitchSuppressionHandler(final ProxyConnection proxyConnection, final Owner owner) {
         super(proxyConnection);
@@ -401,13 +405,13 @@ public class SwitchSuppressionHandler extends PacketHandler {
         }
         if (job != null && !job.isSwitching()) this.clientConfiguration.observeServer(packet, job);
         if (job == null) {
-            return this.forwardClientState(packet, listeners);
+            return this.forwardClientState(packet, listeners, null);
         }
         if (!job.isSwitching()) {
             if (job.target().lobby()) {
-                return this.forwardClientState(packet, listeners);
+                return this.forwardClientState(packet, listeners, job);
             }
-            return this.interceptForwardPackets(packet, job) && this.forwardClientState(packet, listeners);
+            return this.interceptForwardPackets(packet, job) && this.forwardClientState(packet, listeners, job);
         }
         try {
             //Diagnostic trace of the backend's switch traffic: the state progression
@@ -550,6 +554,15 @@ public class SwitchSuppressionHandler extends PacketHandler {
                                     .addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
                             if (legacy && i == resets.size() - 1) write.addListeners(writeListeners);
                         }
+                        final ClientIdentity identity = this.bedrockIdentity();
+                        if (this.mirroredSkinSource != null && !this.mirroredSkinSource.equals(backendSkinSource(job, identity))) {
+                            if (identity != null) {
+                                // An empty self profile returns skin selection to Geyser's Bedrock fallback.
+                                this.proxyConnection.getC2P().writeAndFlush(TabListState.localProfile(clientVersion, identity, null))
+                                        .addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
+                            }
+                            this.mirroredSkinSource = null;
+                        }
                     });
                     DebugLog.log("[Switch:{}] world reset sent (client v{}, respawns={}, keep=0)",
                             job.target().playerName(), clientVersion, resets.size());
@@ -576,8 +589,9 @@ public class SwitchSuppressionHandler extends PacketHandler {
                 return false;
             }
 
-            if (packet instanceof S2CLoginGameProfilePacket) {
+            if (packet instanceof S2CLoginGameProfilePacket profile) {
                 DebugLog.log("[Switch:{}] login success received ({} ms)", job.target().playerName(), job.elapsedMillis());
+                job.setBackendPlayerUuid(profile.uuid);
                 this.runRemainingHandlers(packet, listeners);
                 this.advanceAfterLoginSuccess(job);
                 this.clientConfiguration.loggedIn(job);
@@ -660,7 +674,8 @@ public class SwitchSuppressionHandler extends PacketHandler {
         return true;
     }
 
-    private boolean forwardClientState(final Packet packet, final List<ChannelFutureListener> listeners) {
+    private boolean forwardClientState(final Packet packet, final List<ChannelFutureListener> listeners,
+                                       @Nullable final SwitchJob job) {
         final var protocol = this.proxyConnection.getClientVersion();
         if (this.proxyConnection.getP2sConnectionState() != ConnectionState.PLAY
                 || protocol.getVersionType() != com.viaversion.viaversion.api.protocol.version.VersionType.RELEASE
@@ -675,18 +690,45 @@ public class SwitchSuppressionHandler extends PacketHandler {
         }
         final ChannelFutureListener[] writeListeners = listeners.toArray(new ChannelFutureListener[0]);
         this.onClientLoop(() -> {
+            UnknownPacket localSkin = null;
+            UUID skinSource = null;
             try {
-                if (TabListState.isPlayerList(raw, protocol.getOriginalVersion())) this.tabList.observe(raw, protocol.getOriginalVersion());
-                else if (ScoreboardState.isScoreboard(raw, protocol.getOriginalVersion())) this.scoreboard.observe(raw, protocol.getOriginalVersion());
-                else this.waypoints.observe(raw);
+                if (TabListState.isPlayerList(raw, protocol.getOriginalVersion())) {
+                    final ClientIdentity identity = this.bedrockIdentity();
+                    if (job != null && job == this.currentJob.get() && !job.isFailed()) {
+                        skinSource = backendSkinSource(job, identity);
+                    }
+                    localSkin = this.tabList.observe(raw, protocol.getOriginalVersion(), skinSource, identity);
+                } else if (ScoreboardState.isScoreboard(raw, protocol.getOriginalVersion())) {
+                    this.scoreboard.observe(raw, protocol.getOriginalVersion());
+                } else {
+                    this.waypoints.observe(raw);
+                }
             } catch (RuntimeException e) {
                 // A malformed/unknown body remains native client traffic. Never
                 // invent an ID, partially mutate the tracker or alter its packet.
                 CoreMain.logger().warn("Could not track client state for client v{}: {}", protocol.getOriginalVersion(), e.toString());
             }
             this.proxyConnection.getC2P().writeAndFlush(packet).addListeners(writeListeners);
+            if (localSkin != null) {
+                // Geyser recognizes its own original UUID. Keep the backend's normal roster entry intact.
+                this.mirroredSkinSource = skinSource;
+                this.proxyConnection.getC2P().writeAndFlush(localSkin).addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
+            }
         });
         return false; // the public handler chain and final client write ran once
+    }
+
+    private @Nullable ClientIdentity bedrockIdentity() {
+        final ClientIdentity identity = this.proxyConnection.getC2P().attr(CPAttributeKeys.CLIENT_IDENTITY).get();
+        return identity != null && identity.kind() == ClientIdentity.Kind.VERIFIED_BEDROCK
+                && identity.wireUuid() != null && identity.wireName() != null ? identity : null;
+    }
+
+    private static @Nullable UUID backendSkinSource(final SwitchJob job, @Nullable final ClientIdentity identity) {
+        if (identity == null || job.target().lobby() || !job.authenticated()) return null;
+        final UUID backendUuid = job.backendPlayerUuid();
+        return identity.wireUuid().equals(backendUuid) ? null : backendUuid;
     }
 
     private void onClientLoop(final Runnable action) {

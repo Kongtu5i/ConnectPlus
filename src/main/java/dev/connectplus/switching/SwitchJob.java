@@ -53,6 +53,7 @@ public final class SwitchJob {
     private final AtomicReference<Phase> phase = new AtomicReference<>(Phase.SWITCHING);
     private volatile @Nullable String failureReason;
     private volatile boolean authenticated;
+    private volatile @Nullable UUID backendPlayerUuid;
 
     private SwitchJob(final Target target, final long startedAtNanos) {
         this.target = target;
@@ -75,6 +76,14 @@ public final class SwitchJob {
 
     public boolean authenticated() {
         return this.authenticated;
+    }
+
+    void setBackendPlayerUuid(final UUID uuid) {
+        this.backendPlayerUuid = uuid;
+    }
+
+    @Nullable UUID backendPlayerUuid() {
+        return this.backendPlayerUuid;
     }
 
     /**

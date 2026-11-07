@@ -2,6 +2,8 @@ package dev.connectplus.switching;
 
 import com.viaversion.viaversion.api.protocol.version.ProtocolVersion;
 import dev.connectplus.commands.LobbyCommands;
+import dev.connectplus.compat.CPAttributeKeys;
+import dev.connectplus.identity.ClientIdentity;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
@@ -46,6 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
@@ -58,6 +61,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 class SwitchSuppressionHandlerTest {
 
     private static final ProtocolVersion CLIENT_VERSION = ProtocolVersion.v1_21_4;
+    private static final int SKIN_TEST_PROTOCOL = 777;
 
     private EmbeddedChannel c2p;
     private EmbeddedChannel p2s;
@@ -502,6 +506,135 @@ class SwitchSuppressionHandlerTest {
         org.junit.jupiter.api.Assertions.assertSame(joinGame, this.c2p.readOutbound());
         assertEquals(MCPackets.S2C_RESPAWN.getId(769), ((UnknownPacket) this.c2p.readOutbound()).packetId);
         assertNoOutbound(this.c2p);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    void bedrockSwitchMirrorsOnlyTheBackendPlayersSkinAndRestoresItWithoutAnAccount(final boolean lobby) {
+        final UUID wireId = UUID.randomUUID();
+        final UUID javaId = UUID.randomUUID();
+        final UUID otherId = UUID.randomUUID();
+        final ClientIdentity identity = ClientIdentity.verifiedBedrock(wireId, "BedrockName", "1234", UUID.randomUUID(), "session");
+        this.c2p.attr(CPAttributeKeys.CLIENT_IDENTITY).set(identity);
+        completeSkinSwitch(javaId, true, false);
+
+        final UnknownPacket update = skinProfiles(otherId, javaId);
+        assertFalse(this.suppression.handleP2S(update, new ArrayList<>()));
+        assertSame(update, this.c2p.readOutbound());
+        assertLocalSkin(this.c2p.readOutbound(), wireId, "local-texture");
+        assertSame(identity, this.c2p.attr(CPAttributeKeys.CLIENT_IDENTITY).get());
+
+        final UUID nextJavaId = UUID.randomUUID();
+        completeSkinSwitch(nextJavaId, true, false);
+        assertLocalSkin(this.c2p.readOutbound(), wireId, null);
+        final UnknownPacket oldProfile = skinProfiles(otherId, javaId);
+        assertFalse(this.suppression.handleP2S(oldProfile, new ArrayList<>()));
+        assertSame(oldProfile, this.c2p.readOutbound());
+        assertNoOutbound(this.c2p);
+        final UnknownPacket nextProfile = skinProfiles(otherId, nextJavaId);
+        assertFalse(this.suppression.handleP2S(nextProfile, new ArrayList<>()));
+        assertSame(nextProfile, this.c2p.readOutbound());
+        assertLocalSkin(this.c2p.readOutbound(), wireId, "local-texture");
+
+        completeSkinSwitch(wireId, false, lobby);
+        assertLocalSkin(this.c2p.readOutbound(), wireId, null);
+        assertNoOutbound(this.c2p);
+
+        completeSkinSwitch(javaId, true, false);
+        assertFalse(this.suppression.handleP2S(update, new ArrayList<>()));
+        assertSame(update, this.c2p.readOutbound());
+        assertLocalSkin(this.c2p.readOutbound(), wireId, "local-texture");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    void switchOnlyMirrorsSkinForBedrockWithADifferentBackendUuid(final boolean bedrock) {
+        final UUID wireId = UUID.randomUUID();
+        final UUID javaId = bedrock ? wireId : UUID.randomUUID();
+        final ClientIdentity identity = bedrock
+                ? ClientIdentity.verifiedBedrock(wireId, "BedrockName", "1234", UUID.randomUUID(), "session")
+                : ClientIdentity.verifiedJava(wireId, "JavaName", wireId);
+        this.c2p.attr(CPAttributeKeys.CLIENT_IDENTITY).set(identity);
+        completeSkinSwitch(javaId, true, false);
+        final UnknownPacket update = skinProfiles(UUID.randomUUID(), javaId);
+        assertFalse(this.suppression.handleP2S(update, new ArrayList<>()));
+        assertSame(update, this.c2p.readOutbound());
+        assertNoOutbound(this.c2p);
+    }
+
+    private void completeSkinSwitch(final UUID profileId, final boolean authenticated, final boolean lobby) {
+        final int version = SKIN_TEST_PROTOCOL;
+        this.pc.setClientVersion(ProtocolVersion.getProtocol(version));
+        this.p2s.attr(MCPipeline.PACKET_REGISTRY_ATTRIBUTE_KEY).set(new DefaultPacketRegistry(true, version));
+        this.pc.setP2sConnectionState(ConnectionState.LOGIN);
+        beginJob(lobby).markAuthenticated(authenticated);
+        assertFalse(this.suppression.handleP2S(new S2CLoginGameProfilePacket(profileId, "TargetName", List.of()), new ArrayList<>()));
+        readOutbound(this.c2p, S2CPlayStartConfigurationPacket.class);
+        readOutbound(this.p2s, C2SLoginAcknowledgedPacket.class);
+        assertFalse(this.suppression.handleC2P(new net.raphimc.netminecraft.packet.impl.play.C2SPlayConfigurationAcknowledgedPacket(), new ArrayList<>()));
+        assertFalse(this.suppression.handleP2S(new S2CConfigFinishConfigurationPacket(), new ArrayList<>()));
+        readOutbound(this.c2p, S2CConfigFinishConfigurationPacket.class);
+        final var finish = new C2SConfigFinishConfigurationPacket();
+        final List<ChannelFutureListener> listeners = new ArrayList<>();
+        assertTrue(this.suppression.handleC2P(finish, listeners));
+        new net.raphimc.viaproxy.proxy.packethandler.ConfigurationPacketHandler(this.pc).handleC2P(finish, listeners);
+        this.p2s.writeAndFlush(finish).addListeners(listeners.toArray(new ChannelFutureListener[0]));
+        readOutbound(this.p2s, C2SConfigFinishConfigurationPacket.class);
+        final UnknownPacket join = dev.connectplus.testutil.ModernWorldPackets.join(version);
+        assertFalse(this.suppression.handleP2S(join, new ArrayList<>()));
+        UnknownPacket forwarded;
+        do {
+            forwarded = assertInstanceOf(UnknownPacket.class, this.c2p.readOutbound());
+        } while (forwarded.packetId == MCPackets.S2C_PLAYER_INFO_REMOVE.getId(version));
+        assertSame(join, forwarded);
+        assertEquals(MCPackets.S2C_RESPAWN.getId(version), ((UnknownPacket) this.c2p.readOutbound()).packetId);
+    }
+
+    private static UnknownPacket skinProfiles(final UUID otherId, final UUID localId) {
+        final ByteBuf bytes = Unpooled.buffer();
+        try {
+            bytes.writeByte(1 | 8); // ADD_PLAYER and UPDATE_LISTED
+            PacketTypes.writeVarInt(bytes, 2);
+            writeSkinProfile(bytes, otherId, "OtherPlayer", "other-texture");
+            bytes.writeBoolean(true);
+            writeSkinProfile(bytes, localId, "TargetName", "local-texture");
+            bytes.writeBoolean(true);
+            return new UnknownPacket(MCPackets.S2C_PLAYER_INFO_UPDATE.getId(SKIN_TEST_PROTOCOL), ByteBufUtil.getBytes(bytes));
+        } finally {
+            bytes.release();
+        }
+    }
+
+    private static void writeSkinProfile(final ByteBuf bytes, final UUID uuid, final String name, final String texture) {
+        bytes.writeLong(uuid.getMostSignificantBits()).writeLong(uuid.getLeastSignificantBits());
+        PacketTypes.writeString(bytes, name);
+        PacketTypes.writeVarInt(bytes, 1);
+        PacketTypes.writeString(bytes, "textures");
+        PacketTypes.writeString(bytes, texture);
+        bytes.writeBoolean(true);
+        PacketTypes.writeString(bytes, "signature");
+    }
+
+    private static void assertLocalSkin(final Object packet, final UUID uuid, final String texture) {
+        final UnknownPacket update = assertInstanceOf(UnknownPacket.class, packet);
+        assertEquals(MCPackets.S2C_PLAYER_INFO_UPDATE.getId(SKIN_TEST_PROTOCOL), update.packetId);
+        final ByteBuf bytes = Unpooled.wrappedBuffer(update.data);
+        try {
+            assertEquals(1, bytes.readUnsignedByte());
+            assertEquals(1, PacketTypes.readVarInt(bytes));
+            assertEquals(uuid, new UUID(bytes.readLong(), bytes.readLong()));
+            assertEquals("BedrockName", PacketTypes.readString(bytes, 16));
+            assertEquals(texture == null ? 0 : 1, PacketTypes.readVarInt(bytes));
+            if (texture != null) {
+                assertEquals("textures", PacketTypes.readString(bytes, 64));
+                assertEquals(texture, PacketTypes.readString(bytes, 64));
+                assertTrue(bytes.readBoolean());
+                assertEquals("signature", PacketTypes.readString(bytes, 64));
+            }
+            assertFalse(bytes.isReadable());
+        } finally {
+            bytes.release();
+        }
     }
 
     @org.junit.jupiter.params.ParameterizedTest

@@ -1,6 +1,7 @@
 package dev.connectplus.switching;
 
 import com.viaversion.viaversion.api.type.Types;
+import dev.connectplus.identity.ClientIdentity;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
@@ -8,6 +9,7 @@ import net.raphimc.netminecraft.constants.MCPackets;
 import net.raphimc.netminecraft.packet.PacketTypes;
 import net.raphimc.netminecraft.packet.UnknownPacket;
 
+import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -30,7 +32,9 @@ final class TabListState {
                 : packet.packetId == MCPackets.S2C_PLAYER_INFO.getId(version);
     }
 
-    void observe(UnknownPacket packet, int version) {
+    /** Tracks the roster and returns a separate local profile if it contains the backend's own player. */
+    @Nullable UnknownPacket observe(UnknownPacket packet, int version, @Nullable UUID skinSource,
+                                    @Nullable ClientIdentity bedrockIdentity) {
         // Parse completely before mutating state: truncated entries must not
         // fabricate UUIDs or partially replace an already tracked player list.
         var bytes = Unpooled.wrappedBuffer(packet.data);
@@ -41,24 +45,31 @@ final class TabListState {
                 bytes.readShort();
                 requireEnd(bytes);
                 if (add) legacyNames.add(name); else legacyNames.remove(name);
-                return;
+                return null;
             }
             boolean remove = version >= 761 && packet.packetId == MCPackets.S2C_PLAYER_INFO_REMOVE.getId(version);
             int actions = remove ? 0 : version >= 761 ? bytes.readUnsignedByte() : PacketTypes.readVarInt(bytes);
             if (version >= 761 && !remove) {
                 int allowed = version >= 769 ? 255 : version >= 768 ? 127 : 63;
                 if ((actions & ~allowed) != 0) throw new IllegalArgumentException("Unaudited player-info actions " + actions);
-                if ((actions & 1) == 0) return; // Updates cannot create a client profile; keep unlisted profiles until removal.
+                if ((actions & 1) == 0) return null; // Updates cannot create a client profile; keep unlisted profiles until removal.
             } else if (!remove && actions != 0 && actions != 4) {
-                return; // Legacy game-mode/latency/display updates also cannot add a profile.
+                return null; // Legacy game-mode/latency/display updates also cannot add a profile.
             }
             remove |= version < 761 && actions == 4;
             int count = count(bytes);
             List<UUID> entries = new ArrayList<>(count);
+            ByteBuf skinProperties = null;
             for (int i = 0; i < count; i++) {
-                entries.add(new UUID(bytes.readLong(), bytes.readLong()));
+                final UUID uuid = new UUID(bytes.readLong(), bytes.readLong());
+                entries.add(uuid);
                 if (remove) continue;
-                skipProfile(bytes);
+                PacketTypes.readString(bytes, 16);
+                final int propertiesStart = bytes.readerIndex();
+                skipProperties(bytes);
+                if (version >= 761 && uuid.equals(skinSource)) {
+                    skinProperties = bytes.slice(propertiesStart, bytes.readerIndex() - propertiesStart);
+                }
                 if (version >= 761) {
                     if ((actions & 2) != 0 && bytes.readBoolean()) {
                         bytes.skipBytes(16 + 8); // chat session UUID and expiry
@@ -84,7 +95,24 @@ final class TabListState {
             }
             requireEnd(bytes);
             if (remove) players.removeAll(entries); else players.addAll(entries);
+            return skinProperties == null || bedrockIdentity == null ? null : localProfile(version, bedrockIdentity, skinProperties);
         } finally { bytes.release(); }
+    }
+
+    static UnknownPacket localProfile(int version, ClientIdentity identity, @Nullable ByteBuf properties) {
+        final ByteBuf bytes = Unpooled.buffer();
+        try {
+            bytes.writeByte(1); // ADD_PLAYER is enough for Geyser to update the local skin.
+            PacketTypes.writeVarInt(bytes, 1);
+            final UUID uuid = identity.wireUuid();
+            bytes.writeLong(uuid.getMostSignificantBits()).writeLong(uuid.getLeastSignificantBits());
+            PacketTypes.writeString(bytes, identity.wireName());
+            if (properties == null) PacketTypes.writeVarInt(bytes, 0);
+            else bytes.writeBytes(properties);
+            return new UnknownPacket(MCPackets.S2C_PLAYER_INFO_UPDATE.getId(version), ByteBufUtil.getBytes(bytes));
+        } finally {
+            bytes.release();
+        }
     }
 
     List<UnknownPacket> clear(int version) {
@@ -113,8 +141,7 @@ final class TabListState {
         return result;
     }
 
-    private static void skipProfile(ByteBuf bytes) {
-        PacketTypes.readString(bytes, 16);
+    private static void skipProperties(ByteBuf bytes) {
         for (int properties = count(bytes); properties > 0; properties--) {
             skipBytes(bytes); // property name
             skipBytes(bytes); // property value, commonly a texture
