@@ -68,7 +68,7 @@ public class PlayStateHandler extends StateHandler {
         this.handlerManager.register(this.hotbar);
         this.handlerManager.register(this.screenHandler);
         final dev.connectplus.lobby.LobbyTransfers.Pending transfer = this.handler.getSession() == null ? null
-                : dev.connectplus.lobby.LobbyTransfers.consume(this.handler.getSession().uuid);
+                : dev.connectplus.lobby.LobbyTransfers.consume(this.handler.getSession().uuid, this.handler.getSession().c2pChannel);
         if (transfer != null) {
             //A backend asked the proxy to move this player (transferPolicy=confirm):
             //the confirmation GUI replaces the main screen for this load (M7 F7.1)
@@ -105,7 +105,7 @@ public class PlayStateHandler extends StateHandler {
         if (session == null) {
             return;
         }
-        final java.util.List<LobbyNotices.Notice> notices = LobbyNotices.consume(session.uuid);
+        final java.util.List<LobbyNotices.Notice> notices = LobbyNotices.consume(session.uuid, session.c2pChannel);
         if (notices == null) {
             return;
         }

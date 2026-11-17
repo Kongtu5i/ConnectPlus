@@ -274,7 +274,11 @@ public class LobbyServerHandler extends SimpleChannelInboundHandler<Packet> {
         //The identity is now verified: the earlier temporary visit of this same
         //connection (recorded at play-state entry) folds into the confirmed identity.
         this.recordLobbyVisit(session, identity);
-        this.storageExecutor.execute(() -> this.loadProtectedProfile(channel, session, identity));
+        try { this.storageExecutor.execute(() -> this.loadProtectedProfile(channel, session, identity)); }
+        catch (java.util.concurrent.RejectedExecutionException busy) {
+            this.loadingProfileSession = null;
+            channel.close();
+        }
     }
 
     /** Every async stage rechecks the channel, session and live proof that authorized the load. */
@@ -460,37 +464,42 @@ public class LobbyServerHandler extends SimpleChannelInboundHandler<Packet> {
         if (existingAccount != null ? existingAccount.isExpired() : accountBlob != null && data.saveLoginInfo) {
             final SessionLease restoreLease = session.lease;
             this.accountRefreshInProgress = true;
-            this.storageExecutor.execute(() -> {
-                CpAccounts.RestoreResult outcome = null;
-                if (this.accountOperationCurrent(channel, session, data, existingAccount, accountBlob, restoreLease)) {
-                    outcome = existingAccount != null ? CpAccounts.refresh(existingAccount)
-                            : this.restoreAccountFromJson(this.tokenStore.decrypt(accountBlob), data.uuid());
-                }
-                final CpAccounts.RestoreResult result = outcome;
-                channel.eventLoop().execute(() -> {
-                    this.accountRefreshInProgress = false;
-                    synchronized (session) {
-                        if (result != null && this.accountOperationCurrent(channel, session, data,
-                                existingAccount, accountBlob, restoreLease)) {
-                            this.accountRestoreStatus = result.status();
-                            if (result.status() == CpAccounts.RestoreResult.Status.RESTORED) {
-                                session.account = result.account();
-                                this.watchAccountChanges(session);
-                                this.queueAccountSave(session, result.account(), data, restoreLease);
-                                this.recordKnownAccountName(result.account());
-                            } else {
-                                this.nextAccountRefreshAt = System.nanoTime() + TimeUnit.MINUTES.toNanos(1);
-                                if (result.status() == CpAccounts.RestoreResult.Status.REAUTH_REQUIRED) {
-                                    session.account = null;
-                                    this.watchAccountChanges(session);
-                                }
-                                this.logRestoreOutcome(session, result);
-                            }
-                            if (this.handler instanceof PlayStateHandler play) play.refreshAccountDisplay();
-                        }
+            try {
+                this.storageExecutor.execute(() -> {
+                    CpAccounts.RestoreResult outcome = null;
+                    if (this.accountOperationCurrent(channel, session, data, existingAccount, accountBlob, restoreLease)) {
+                        outcome = existingAccount != null ? CpAccounts.refresh(existingAccount)
+                                : this.restoreAccountFromJson(this.tokenStore.decrypt(accountBlob), data.uuid());
                     }
+                    final CpAccounts.RestoreResult result = outcome;
+                    channel.eventLoop().execute(() -> {
+                        this.accountRefreshInProgress = false;
+                        synchronized (session) {
+                            if (result != null && this.accountOperationCurrent(channel, session, data,
+                                    existingAccount, accountBlob, restoreLease)) {
+                                this.accountRestoreStatus = result.status();
+                                if (result.status() == CpAccounts.RestoreResult.Status.RESTORED) {
+                                    session.account = result.account();
+                                    this.watchAccountChanges(session);
+                                    this.queueAccountSave(session, result.account(), data, restoreLease);
+                                    this.recordKnownAccountName(result.account());
+                                } else {
+                                    this.nextAccountRefreshAt = System.nanoTime() + TimeUnit.MINUTES.toNanos(1);
+                                    if (result.status() == CpAccounts.RestoreResult.Status.REAUTH_REQUIRED) {
+                                        session.account = null;
+                                        this.watchAccountChanges(session);
+                                    }
+                                    this.logRestoreOutcome(session, result);
+                                }
+                                if (this.handler instanceof PlayStateHandler play) play.refreshAccountDisplay();
+                            }
+                        }
+                    });
                 });
-            });
+            } catch (java.util.concurrent.RejectedExecutionException busy) {
+                this.accountRefreshInProgress = false;
+                this.nextAccountRefreshAt = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+            }
         }
     }
 
@@ -542,38 +551,102 @@ public class LobbyServerHandler extends SimpleChannelInboundHandler<Packet> {
             final PlayerData data = session.playerData;
             final SessionLease lease = session.lease;
             final Runnable unsubscribe = account.onChange(() -> this.queueAccountSave(session, account, data, lease));
-            session.accountChangeUnsubscribe = unsubscribe;
-            if (session.c2pChannel != null) session.c2pChannel.closeFuture().addListener(ignored -> unsubscribe.run());
+            final Channel client = session.c2pChannel;
+            final io.netty.channel.ChannelFutureListener closed = ignored -> {
+                synchronized (session) {
+                    unsubscribe.run();
+                    if (session.observedAccount == account) {
+                        session.observedAccount = null; session.observedAccountData = null;
+                        session.observedAccountLease = null; session.accountChangeUnsubscribe = null;
+                    }
+                }
+            };
+            session.accountChangeUnsubscribe = () -> {
+                unsubscribe.run();
+                if (client != null) client.closeFuture().removeListener(closed);
+            };
+            if (client != null) client.closeFuture().addListener(closed);
         }
     }
 
     private void queueAccountSave(final PlayerSession session, final CPAccount account,
                                   final PlayerData data, final SessionLease lease) {
-        try {
-            this.storageExecutor.execute(() -> {
-                synchronized (session) {
-                    if (!this.accountSaveCurrent(session, account, data, lease)) return;
-                    try {
-                        final String json = account.toJson();
-                        if (data.accountBlob != null && json.equals(this.tokenStore.decrypt(data.accountBlob))) return;
-                        final String encrypted = this.tokenStore.encrypt(json);
-                        if (!this.accountSaveCurrent(session, account, data, lease)) return;
+        synchronized (session) {
+            if (!this.accountSaveCurrent(session, account, data, lease)) return;
+            if (session.pendingAccountSave instanceof AccountSave pending) {
+                if (pending.account == account && pending.data == data && pending.lease == lease) return;
+                pending.cancel();
+            }
+            final AccountSave pending = new AccountSave(session, account, data, lease);
+            session.pendingAccountSave = pending;
+            if (pending.client != null) pending.client.closeFuture().addListener(pending);
+            pending.submit();
+        }
+    }
+
+    /** Full queues retain one dirty snapshot per session and retry without another token event. */
+    private final class AccountSave implements Runnable, io.netty.channel.ChannelFutureListener {
+        final PlayerSession session;
+        final CPAccount account;
+        final PlayerData data;
+        final SessionLease lease;
+        final Channel client;
+        java.util.concurrent.ScheduledFuture<?> retry;
+        boolean canceled, queued;
+        AccountSave(PlayerSession session, CPAccount account, PlayerData data, SessionLease lease) {
+            this.session = session; this.account = account; this.data = data; this.lease = lease;
+            this.client = session.c2pChannel;
+        }
+        boolean current() {
+            return !canceled && session.pendingAccountSave == this && accountSaveCurrent(session,account,data,lease);
+        }
+        void submit() {
+            synchronized (session) {
+                retry = null;
+                if (!current()) { cancel(); return; }
+                if (queued) return;
+                queued = true;
+                try { storageExecutor.execute(this); }
+                catch (java.util.concurrent.RejectedExecutionException busy) { queued = false; retry(); }
+            }
+        }
+        void retry() {
+            if (client == null || !client.isActive() || storageExecutor.isShutdown()) { cancel(); return; }
+            if (retry != null) return;
+            try { retry = client.eventLoop().schedule(this::submit, 1, TimeUnit.SECONDS); }
+            catch (java.util.concurrent.RejectedExecutionException stopping) { cancel(); }
+        }
+        void cancel() {
+            synchronized (session) {
+                canceled = true;
+                if (storageExecutor instanceof java.util.concurrent.ThreadPoolExecutor pool) pool.remove(this);
+                if (session.pendingAccountSave == this) session.pendingAccountSave = null;
+                if (retry != null) { retry.cancel(false); retry = null; }
+                if (client != null) client.closeFuture().removeListener(this);
+            }
+        }
+        @Override public void operationComplete(io.netty.channel.ChannelFuture ignored) { cancel(); }
+        @Override public void run() {
+            synchronized (session) {
+                queued = false;
+                if (!current()) { cancel(); return; }
+                try {
+                    final String json = account.toJson();
+                    if (data.accountBlob == null || !json.equals(tokenStore.decrypt(data.accountBlob))) {
+                        final String encrypted = tokenStore.encrypt(json);
+                        if (!current()) { cancel(); return; }
                         final String previous = data.accountBlob;
                         data.accountBlob = encrypted;
-                        try {
-                            this.playerStore.save(data.key, data);
-                        } catch (final IOException e) {
-                            data.accountBlob = previous;
-                            throw e;
-                        }
-                    } catch (final Exception e) {
-                        LoggerFactory.getLogger("ConnectPlus").warn("Saving refreshed account of {} failed ({})",
-                                session.uuid, e.getClass().getSimpleName());
+                        try { playerStore.save(data.key, data); }
+                        catch (IOException failure) { data.accountBlob = previous; throw failure; }
                     }
+                    cancel();
+                } catch (Exception failure) {
+                    LoggerFactory.getLogger("ConnectPlus").warn("Saving refreshed account of {} failed ({})",
+                            session.uuid, failure.getClass().getSimpleName());
+                    retry();
                 }
-            });
-        } catch (final java.util.concurrent.RejectedExecutionException ignored) {
-            //Shutdown must not make a token refresh fail inside the authentication library.
+            }
         }
     }
 
@@ -655,6 +728,7 @@ public class LobbyServerHandler extends SimpleChannelInboundHandler<Packet> {
                 : LobbyLink.clientIdentityOf(session.lobbyChannel);
         final UUID wireUuid = session.uuid;
         final String name = session.name;
+        try {
         this.storageExecutor.execute(() -> {
             try {
                 this.visitStore.recordVisit(wireUuid, name, identity);
@@ -664,6 +738,9 @@ public class LobbyServerHandler extends SimpleChannelInboundHandler<Packet> {
                 LoggerFactory.getLogger("ConnectPlus").warn("Recording the visit of {} failed", session.uuid, e);
             }
         });
+        } catch (java.util.concurrent.RejectedExecutionException busy) {
+            LoggerFactory.getLogger("ConnectPlus").warn("Visit metadata queue is busy; retry on the next visit");
+        }
     }
 
     /**
@@ -688,6 +765,7 @@ public class LobbyServerHandler extends SimpleChannelInboundHandler<Packet> {
         if (profileName == null || profileName.isBlank()) {
             return;
         }
+        try {
         this.storageExecutor.execute(() -> {
             try {
                 this.visitStore.recordKnownJavaName(javaUuid, profileName);
@@ -697,6 +775,9 @@ public class LobbyServerHandler extends SimpleChannelInboundHandler<Packet> {
                 LoggerFactory.getLogger("ConnectPlus").warn("Recording the known name of {} failed", javaUuid, e);
             }
         });
+        } catch (java.util.concurrent.RejectedExecutionException busy) {
+            LoggerFactory.getLogger("ConnectPlus").warn("Visit metadata queue is busy; retry on the next visit");
+        }
     }
 
     @Override
@@ -709,6 +790,7 @@ public class LobbyServerHandler extends SimpleChannelInboundHandler<Packet> {
     @Override
     public void handlerRemoved(final ChannelHandlerContext ctx) {
         this.sessions.remove(ctx.channel());
+        if (this.tickTask != null) this.tickTask.cancel(false);
         final PlayerSession session = this.session;
         if (session != null) {
             synchronized (session) {

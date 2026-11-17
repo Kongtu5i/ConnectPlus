@@ -51,10 +51,7 @@ public final class LobbyNotices {
         String text(String lang);
     }
 
-    private record Pending(List<Notice> notices, @Nullable Channel connection) {
-    }
-
-    private static final ConcurrentHashMap<UUID, Pending> NOTICES = new ConcurrentHashMap<>();
+    private static final PendingMessages<List<Notice>> NOTICES = new PendingMessages<>();
 
     private LobbyNotices() {
     }
@@ -76,13 +73,7 @@ public final class LobbyNotices {
         if (notices == null || notices.isEmpty()) {
             return () -> {};
         }
-        final Pending pending = new Pending(List.copyOf(notices), connection);
-        NOTICES.put(player, pending);
-        final Runnable discard = () -> NOTICES.computeIfPresent(player, (key, current) -> current == pending ? null : current);
-        if (connection != null) {
-            connection.closeFuture().addListener(future -> discard.run());
-        }
-        return discard;
+        return NOTICES.post(player, List.copyOf(notices), connection);
     }
 
     /**
@@ -101,10 +92,12 @@ public final class LobbyNotices {
      */
     @Nullable
     public static List<Notice> consume(final UUID player) {
-        final Pending pending = NOTICES.remove(player);
-        // A new login must not race a close listener on the previous event loop.
-        if (pending == null || pending.connection() != null && !pending.connection().isActive()) return null;
-        return pending.notices();
+        return NOTICES.consume(player);
+    }
+
+    public static List<Notice> consume(final UUID player, final Channel connection) {
+        // Bare loopback diagnostics have no proxy connection; preserve their legacy lookup.
+        return connection == null ? NOTICES.consume(player) : NOTICES.consume(player, connection);
     }
 
     /**

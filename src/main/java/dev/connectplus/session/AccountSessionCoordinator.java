@@ -251,14 +251,17 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
      * disk) rotates in a fresh domain so the stuck thread cannot head-of-line-block
      * every future displacement (review fix).
      */
-    private volatile ExecutorService storage;
-    /** Guards a storage rotation against double-rotation by concurrent timeouts. */
-    private final AtomicBoolean rotating = new AtomicBoolean();
+    private final dev.connectplus.resources.RecoveringStorageExecutor storage;
+    private final Object decisionLock = new Object();
+    private volatile boolean stopped;
+    private final java.util.Set<CompletableFuture<?>> requests = ConcurrentHashMap.newKeySet();
     /** connectionId -> the connection's tracked current lease (exists iff a current lease exists). */
     private final ConcurrentHashMap<UUID, Tracked> tracked = new ConcurrentHashMap<>();
     /** resourceId -> the holder of the resource. */
     private final ConcurrentHashMap<String, Holder> holders = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<UUID, AtomicLong> generations = new ConcurrentHashMap<>();
+    private final AtomicLong generations = new AtomicLong();
+    /** Actual disk work, including tasks which outlive their caller's timeout. */
+    private final ConcurrentHashMap<String, Integer> savingResources = new ConcurrentHashMap<>();
     /** Serial-domain only: an older pending claim must never supersede a later lobby return. */
     private final Map<UUID, ClaimRequest> pendingClaims = new HashMap<>();
 
@@ -280,15 +283,42 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
         this.bridgeEndpoint = bridgeEndpoint;
         this.displacement = Objects.requireNonNull(displacement, "displacement");
         this.serial = singleThreadExecutor("ConnectPlus-SessionCoord");
-        this.storage = singleThreadExecutor("ConnectPlus-SessionCoord-IO");
+        this.storage = new dev.connectplus.resources.RecoveringStorageExecutor("ConnectPlus-SessionCoord-IO", 2);
     }
 
     private static ExecutorService singleThreadExecutor(final String name) {
-        return Executors.newSingleThreadExecutor(runnable -> {
-            final Thread thread = new Thread(runnable, name);
-            thread.setDaemon(true);
-            return thread;
-        });
+        return dev.connectplus.resources.ResourceExecutors.single(name);
+    }
+
+    private Runnable guardedDecision(Runnable decision) {
+        return () -> { synchronized (decisionLock) { if (!stopped) decision.run(); } };
+    }
+
+    /** New claims may be refused under load; accepted operations must still be able to finish. */
+    private void enqueue(Runnable decision, CompletableFuture<?> result) {
+        synchronized (decisionLock) {
+            if (stopped || requests.size() >= 1024) {
+                result.completeExceptionally(new java.util.concurrent.RejectedExecutionException("Coordinator busy or stopped"));
+                return;
+            }
+            requests.add(result);
+            result.whenComplete((v, e) -> requests.remove(result));
+            try {
+                this.serial.execute(() -> {
+                    synchronized (decisionLock) {
+                        if (stopped) result.completeExceptionally(new CancellationException("Coordinator stopped"));
+                        else decision.run();
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException busy) { result.completeExceptionally(busy); }
+        }
+    }
+
+    /** Short arbitration/cleanup only, never disk IO. The lock preserves mutual exclusion on overflow. */
+    private void dispatch(Runnable decision) {
+        Runnable guarded = guardedDecision(decision);
+        try { this.serial.execute(guarded); }
+        catch (java.util.concurrent.RejectedExecutionException busy) { guarded.run(); }
     }
 
     // ---- §7: claim / isCurrent / release ------------------------------------
@@ -305,7 +335,7 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
             for (final UUID account : accountUuids) resources.add(accountResource(account));
         }
         final CompletableFuture<SessionLease> result = new CompletableFuture<>();
-        this.serial.execute(() -> this.decideClaim(new ClaimRequest(session, resources, result)));
+        this.enqueue(() -> this.decideClaim(new ClaimRequest(session, resources, result)), result);
         return result;
     }
 
@@ -349,8 +379,12 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
             for (final UUID account : accountUuids) resources.add(accountResource(account));
         }
         final CompletableFuture<SessionLease> result = new CompletableFuture<>();
-        this.serial.execute(() -> {
+        this.enqueue(() -> {
             try {
+                if (resources.stream().anyMatch(this.savingResources::containsKey)) {
+                    result.complete(null);
+                    return;
+                }
                 final UUID connectionId = session.connectionId;
                 this.supersedePendingClaim(connectionId);
                 //A same-connection re-claim supersedes the orphaned lease (same rule as decideClaim).
@@ -374,22 +408,15 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
             } catch (final Throwable t) {
                 result.completeExceptionally(t);
             }
-        });
+        }, result);
         return result;
     }
 
     @Override
     public CompletionStage<Void> release(final SessionLease lease) {
-        final CompletableFuture<Void> done = new CompletableFuture<>();
-        this.serial.execute(() -> {
-            try {
-                this.doRelease(lease);
-                done.complete(null);
-            } catch (final Throwable t) {
-                done.completeExceptionally(t);
-            }
-        });
-        return done;
+        // Exact-holder cleanup is short and safe ahead of queued claims; it must never be rejected.
+        synchronized (decisionLock) { this.doRelease(lease); }
+        return CompletableFuture.completedFuture(null);
     }
 
     /**
@@ -429,13 +456,13 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
                                                                      final String oldBridgeSessionId,
                                                                      final String newBridgeSessionId) {
         final CompletableFuture<Map<String, Object>> result = new CompletableFuture<>();
-        this.serial.execute(() -> {
+        this.enqueue(() -> {
             try {
                 this.decideDuplicateCandidate(xuid, oldBridgeSessionId, newBridgeSessionId, result);
             } catch (final Throwable t) {
                 result.complete(denied("TIMEOUT"));
             }
-        });
+        }, result);
         return result;
     }
 
@@ -469,7 +496,7 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
             // freeze or save — the safe exit is the targeted bridge DISCONNECT itself.
             this.closeThroughBridge(endpoint, old.connectionId(), oldBridgeSessionId)
                     .whenComplete((v, e) ->
-                            this.serial.execute(() -> this.answerReady(result)));
+                            this.dispatch(() -> this.answerReady(result)));
             return;
         }
         final List<Holder> displaced = List.of(new Holder(tracked.current, tracked.session));
@@ -478,7 +505,7 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
         // late only if the machine is genuinely broken — then the endpoint
         // relays DENIED/TIMEOUT, which is the spec's degraded-not-corrupt answer.
         this.displace(displaced, true, DUPLICATE_CANDIDATE_BUDGET_MILLIS)
-                .whenComplete((v, error) -> this.serial.execute(() -> {
+                .whenComplete((v, error) -> this.dispatch(() -> {
             if (error != null) {
                 result.complete(denied("SAVE_FAILED"));
                 return;
@@ -566,6 +593,10 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
      */
     private void decideClaimAgainstHolders(final ClaimRequest request) {
         if (!this.isPendingClaim(request)) return;
+        if (request.resources().stream().anyMatch(this.savingResources::containsKey)) {
+            this.failClaim(request, new IOException("The previous profile save is still running"));
+            return;
+        }
         final PlayerSession session = request.session();
         if (!claimAccessAllowed(session)) {
             this.failClaim(request, new IllegalStateException("Access admission no longer permits this profile claim"));
@@ -585,7 +616,7 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
             if (!request.result().complete(lease)) this.doRelease(lease);
             return;
         }
-        this.displace(displaced, true).whenComplete((v, error) -> this.serial.execute(() -> {
+        this.displace(displaced, true).whenComplete((v, error) -> this.dispatch(() -> {
             if (!this.isPendingClaim(request)) return;
             if (error != null) {
                 // §5: a save failure grants the new connection nothing and reports a
@@ -647,17 +678,18 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
         // and only for a bounded window (review fix: a hung disk save must stall
         // neither this claim nor the whole displacement mechanism; see below).
         final List<CompletableFuture<Void>> saves = new ArrayList<>();
+        ExecutorService saveDomain = null;
+        try { saveDomain = this.storage.currentDomain(); }
+        catch (java.util.concurrent.RejectedExecutionException busy) { /* every save below fails explicitly */ }
+        final ExecutorService phaseDomain = saveDomain;
         for (final Holder holder : displaced) {
             final CompletableFuture<Void> save = new CompletableFuture<>();
             saves.add(save);
-            this.storage.execute(() -> {
-                try {
-                    this.saveAcceptedModifications(holder.session);
-                    save.complete(null);
-                } catch (final Throwable t) {
-                    save.completeExceptionally(t);
-                }
-            });
+            final PendingSave task = new PendingSave(holder, save);
+            try {
+                if (phaseDomain == null) throw new java.util.concurrent.RejectedExecutionException("Storage is still blocked");
+                phaseDomain.execute(task);
+            } catch (java.util.concurrent.RejectedExecutionException busy) { task.discard(); }
         }
         // Bounded exactly like the exit confirmation: a save that misses the window
         // counts as failed. The old leases are invalidated and the old clients are
@@ -666,7 +698,7 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
         // a stalled chain and never a resurrected old holder.
         CompletableFuture.allOf(saves.toArray(CompletableFuture[]::new))
                 .orTimeout(SAVE_PHASE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
-                .whenComplete((v, saveError) -> this.serial.execute(() -> {
+                .whenComplete((v, saveError) -> this.dispatch(() -> {
                     // Step 3: invalidate the old leases (the resources stay untouched
                     // until the grants below), then notify + close the old clients.
                     for (final Holder holder : displaced) {
@@ -681,7 +713,7 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
                     // permission without a successor.
                     this.evictAll(displaced, saveError == null && withMessage
                                     ? BedrockBridgeEndpoint.REPLACED_KICK_MESSAGE : null, evictBudgetMillis)
-                            .whenComplete((v2, evictError) -> this.serial.execute(() -> {
+                            .whenComplete((v2, evictError) -> this.dispatch(() -> {
                                 if (saveError != null) {
                                     done.completeExceptionally(saveError);
                                 } else {
@@ -699,24 +731,35 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
         CompletableFuture.allOf(saves.toArray(CompletableFuture[]::new))
                 .orTimeout(SAVE_PHASE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
                 .whenComplete((v, e) -> {
-                    if (e instanceof TimeoutException) this.rotateStorageIfTimedOut();
+                    if (e instanceof TimeoutException) this.storage.rotate(phaseDomain);
                 });
         return done;
     }
 
-    /**
-     * Replaces the IO executor when a save phase timed out (review fix): the
-     * stuck thread can no longer head-of-line-block future displacements. The
-     * abandoned task, if it ever completes, writes its result into an already
-     * settled future — harmless. Not synchronised: races simply rotate twice.
-     */
-    private void rotateStorageIfTimedOut() {
-        final ExecutorService stale = this.storage;
-        // Already rotated for this stuck phase (or never timed out): nothing to do.
-        if (this.rotating.compareAndSet(false, true)) {
-            this.storage = singleThreadExecutor("ConnectPlus-SessionCoord-IO");
-            stale.shutdownNow();
-            this.rotating.set(false);
+    private final class PendingSave implements dev.connectplus.resources.DiscardableTask {
+        final Holder holder;
+        final CompletableFuture<Void> result;
+        final AtomicBoolean startedOrDiscarded = new AtomicBoolean();
+        PendingSave(Holder holder, CompletableFuture<Void> result) {
+            this.holder = holder; this.result = result;
+            holder.lease.resources.forEach(resource -> savingResources.merge(resource, 1, Integer::sum));
+        }
+        private void releaseQuarantine() {
+            holder.lease.resources.forEach(resource -> savingResources.computeIfPresent(resource,
+                    (key, count) -> count == 1 ? null : count - 1));
+        }
+        @Override public void discard() {
+            if (!startedOrDiscarded.compareAndSet(false, true)) return;
+            releaseQuarantine();
+            result.completeExceptionally(new CancellationException("Storage task was not started"));
+        }
+        @Override public void run() {
+            if (!startedOrDiscarded.compareAndSet(false, true)) return;
+            Throwable error = null;
+            try { saveAcceptedModifications(holder.session); }
+            catch (Throwable failure) { error = failure; }
+            finally { releaseQuarantine(); }
+            if (error == null) result.complete(null); else result.completeExceptionally(error);
         }
     }
 
@@ -766,9 +809,7 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
     }
 
     private LeaseImpl grant(final PlayerSession session, final Set<String> resources) {
-        final long generation = this.generations
-                .computeIfAbsent(session.connectionId, key -> new AtomicLong())
-                .incrementAndGet();
+        final long generation = this.generations.incrementAndGet();
         final LeaseImpl lease = new LeaseImpl(session.connectionId, generation, Set.copyOf(resources));
         for (final String resource : resources) {
             this.holders.put(resource, new Holder(lease, session));
@@ -817,6 +858,14 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
 
     /** Stops the coordinator's executor domains (plugin disable / test teardown). */
     public void shutdown() {
+        synchronized (decisionLock) {
+            this.stopped = true;
+            java.util.List.copyOf(this.requests).forEach(result -> result.completeExceptionally(new CancellationException("Coordinator stopped")));
+            for (ClaimRequest request : this.pendingClaims.values()) request.result().completeExceptionally(new CancellationException("Coordinator stopped"));
+            this.pendingClaims.clear();
+            this.holders.values().forEach(holder -> holder.lease.state = LeaseState.INVALID);
+            this.holders.clear(); this.tracked.clear();
+        }
         this.serial.shutdownNow();
         this.storage.shutdownNow();
     }
@@ -830,7 +879,7 @@ public final class AccountSessionCoordinator implements SessionLeaseGranter,
     CompletableFuture<Void> awaitIdle() {
         final CompletableFuture<Void> serialIdle = new CompletableFuture<>();
         final CompletableFuture<Void> storageIdle = new CompletableFuture<>();
-        this.serial.execute(() -> serialIdle.complete(null));
+        this.dispatch(() -> serialIdle.complete(null));
         this.storage.execute(() -> storageIdle.complete(null));
         return CompletableFuture.allOf(serialIdle, storageIdle);
     }

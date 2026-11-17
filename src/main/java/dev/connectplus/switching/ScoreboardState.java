@@ -13,8 +13,8 @@ import java.util.Set;
 
 /** Objective/team definitions belonging to the previous backend, confined to c2p's loop. */
 final class ScoreboardState {
-    private final Set<String> objectives = new LinkedHashSet<>();
-    private final Set<String> teams = new LinkedHashSet<>();
+    private final Set<String> objectives = new BoundedStateSet<>(4096, 1024 * 1024, value -> 64L + value.length() * 2L);
+    private final Set<String> teams = new BoundedStateSet<>(4096, 1024 * 1024, value -> 64L + value.length() * 2L);
 
     static boolean supports(int version) { return version <= 777 && WorldReset.supports(version); }
 

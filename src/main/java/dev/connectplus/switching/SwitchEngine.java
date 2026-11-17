@@ -94,6 +94,64 @@ public class SwitchEngine implements SwitchInitiator, SwitchSuppressionHandler.O
     private final ConnectRateLimiter rateLimiter;
     private final ConcurrentHashMap<SwitchJob, List<ScheduledFuture<?>>> tasks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, CPAccount> accountsByConnection = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Channel, ClientResources> clients = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<SwitchJob, ClientResources> jobOwners = new ConcurrentHashMap<>();
+    private ScheduledFuture<?> maintenance;
+    private volatile boolean stopped;
+
+    private final class ClientResources implements io.netty.channel.ChannelFutureListener {
+        final Channel channel;
+        final UUID id;
+        final java.util.Set<SwitchJob> jobs = ConcurrentHashMap.newKeySet();
+        ClientResources(Channel channel, UUID id) { this.channel = channel; this.id = id; }
+        @Override public void operationComplete(io.netty.channel.ChannelFuture ignored) {
+            synchronized (SwitchEngine.this) {
+                clients.remove(channel, this);
+                if (id != null) accountsByConnection.remove(id);
+                for (SwitchJob job : java.util.List.copyOf(jobs)) {
+                    job.fail("Client disconnected");
+                    cancelTasks(job);
+                }
+            }
+        }
+    }
+
+    private synchronized void trackJob(ProxyConnection pc, SwitchJob job) {
+        Channel channel = pc.getC2P();
+        ClientResources resources = clients.get(channel);
+        if (resources == null) {
+            UUID id = channel.attr(CPAttributeKeys.CONNECTION_ID).get();
+            if (id == null) id = job.target().connectionId();
+            resources = new ClientResources(channel, id);
+            clients.put(channel, resources);
+            channel.closeFuture().addListener(resources);
+        }
+        resources.jobs.add(job);
+        jobOwners.put(job, resources);
+        if (!channel.isActive()) resources.operationComplete(null);
+        if (!stopped && maintenance == null) {
+            maintenance = channel.eventLoop().scheduleWithFixedDelay(rateLimiter::pruneExpired, 60, 60, TimeUnit.SECONDS);
+        }
+    }
+
+    /** Stop delayed work and remove credentials even when the host retains closed channels. */
+    public void shutdown() {
+        final java.util.List<ClientResources> closing;
+        synchronized (this) {
+            stopped = true;
+            if (maintenance != null) { maintenance.cancel(false); maintenance = null; }
+            closing = java.util.List.copyOf(clients.values());
+            for (ClientResources resources : closing) {
+                resources.channel.closeFuture().removeListener(resources);
+                resources.operationComplete(null);
+            }
+            for (SwitchJob job : java.util.List.copyOf(tasks.keySet())) cancelTasks(job);
+            accountsByConnection.clear();
+            rateLimiter.reset();
+        }
+        // Closing may invoke another component's callbacks; never hold the engine monitor here.
+        closing.forEach(resources -> resources.channel.close());
+    }
     /**
      * The engine's own active jobs on server targets, added at launch and
      * removed in cancelTasks (every terminal/abort path funnels through it).
@@ -188,7 +246,8 @@ public class SwitchEngine implements SwitchInitiator, SwitchSuppressionHandler.O
         return true; //the switch is running; its failure path is the engine's kick fallback
     }
 
-    private StartResult launch(final ProxyConnection pc, final SwitchJob.Target target, @Nullable final CPAccount account) {
+    private synchronized StartResult launch(final ProxyConnection pc, final SwitchJob.Target target, @Nullable final CPAccount account) {
+        if (this.stopped || pc.getC2P() == null || !pc.getC2P().isActive()) return StartResult.NOT_AVAILABLE;
         // The access gate: a pending identity or an unfinished blacklist inheritance
         // blocks transfers to target servers. Lobby returns (safety recovery) stay
         // permitted for pending connections; denied ones were blocked above.
@@ -236,6 +295,11 @@ public class SwitchEngine implements SwitchInitiator, SwitchSuppressionHandler.O
         } else if (target.connectionId() != null) {
             this.accountsByConnection.remove(target.connectionId());
         }
+        if (target.lobby()) {
+            final UUID connectionId = pc.getC2P().attr(CPAttributeKeys.CONNECTION_ID).get();
+            if (connectionId != null) this.accountsByConnection.remove(connectionId);
+        }
+        this.trackJob(pc, job);
         CoreMain.logger().info("Switching {} to {} ({} version, attempt {})", target.playerName(), target.address(),
                 target.version() == null ? "auto detect" : target.version().getName(), target.attempt());
         pc.getC2P().eventLoop().execute(() -> this.run(pc, job, permittedAccount));
@@ -451,6 +515,19 @@ public class SwitchEngine implements SwitchInitiator, SwitchSuppressionHandler.O
     }
 
     @Override
+    public void onClientStateLimit(final ProxyConnection pc, final SwitchJob job) {
+        this.cancelTasks(job);
+        pc.getC2P().eventLoop().execute(() -> {
+            if (!clientConnected(pc) || this.stopped) return;
+            final LobbyNotices.Notice notice = LobbyNotices.Notice.of(Messages.Commands.SwitchFailed,
+                    job.target().address(), "Target exceeds CP client-state limit");
+            if (!this.switchToLobby(pc, notice, job.target().playerId(), job.target().playerName())) {
+                this.kick(pc, "Target exceeds CP client-state limit");
+            }
+        });
+    }
+
+    @Override
     public void onSwitchFailed(final ProxyConnection pc, final SwitchJob job, @Nullable final String reason) {
         this.cancelTasks(job);
         if (!clientConnected(pc)) return;
@@ -532,9 +609,9 @@ public class SwitchEngine implements SwitchInitiator, SwitchSuppressionHandler.O
                 default -> {
                     //"confirm": back to the lobby, the confirmation GUI (or the chat
                     //fallback) lets the player re-connect deliberately (F7.1)
-                    LobbyTransfers.post(job.target().playerId(), host, port);
+                    final Runnable discard = LobbyTransfers.post(job.target().playerId(), host, port, pc.getC2P());
                     final LobbyNotices.Notice notice = LobbyNotices.Notice.of(Messages.Commands.TransferConfirm, host, port);
-                    this.switchToLobby(pc, notice, job.target().playerId(), job.target().playerName());
+                    if (!this.switchToLobby(pc, notice, job.target().playerId(), job.target().playerName())) discard.run();
                 }
             }
         });
@@ -619,6 +696,7 @@ public class SwitchEngine implements SwitchInitiator, SwitchSuppressionHandler.O
      * watchdog covers the waiting time). Exhausted attempts fall back to the lobby.
      */
     private void reconnectChain(final ProxyConnection pc, final SwitchJob job) {
+        if (this.stopped || !clientConnected(pc)) return;
         final SwitchJob.Target target = job.target();
         //0 = no retries (straight to the lobby); negative configs are treated as 0
         if (target.attempt() > Math.max(0, CPConfig.reconnectAttempts)) {
@@ -631,9 +709,12 @@ public class SwitchEngine implements SwitchInitiator, SwitchSuppressionHandler.O
         }
         final long delaySeconds = (long) Math.max(0, CPConfig.reconnectDelaySeconds) * (target.attempt() - 1);
         final ScheduledFuture<?> keepalive = pc.getC2P().eventLoop().scheduleWithFixedDelay(() -> writeClientKeepAlive(pc), 5, 5, TimeUnit.SECONDS);
-        this.tasks.put(job, List.of(keepalive));
+        this.trackJob(pc, job);
+        final java.util.List<ScheduledFuture<?>> scheduled = new java.util.concurrent.CopyOnWriteArrayList<>();
+        scheduled.add(keepalive);
+        this.tasks.put(job, scheduled);
         CoreMain.logger().info("Reconnect {} of {} to {} in {}s", target.attempt(), target.playerName(), target.address(), delaySeconds);
-        pc.getC2P().eventLoop().schedule(() -> {
+        final ScheduledFuture<?> reconnect = pc.getC2P().eventLoop().schedule(() -> {
             final StartResult result = pc.getC2P().isActive()
                     ? this.launch(pc, target.nextAttempt(), this.cachedAccountFor(target.connectionId(), target.playerName()))
                     : StartResult.NOT_AVAILABLE; //the player is gone; nothing to recover
@@ -661,6 +742,11 @@ public class SwitchEngine implements SwitchInitiator, SwitchSuppressionHandler.O
                 this.kick(pc, "the reconnect could not start (" + result + ")");
             }
         }, delaySeconds, TimeUnit.SECONDS);
+        scheduled.add(reconnect);
+        if (!pc.getC2P().isActive() || this.stopped || this.tasks.get(job) != scheduled) {
+            scheduled.forEach(task -> task.cancel(false));
+            this.cancelTasks(job);
+        }
     }
 
     @Override
@@ -696,6 +782,8 @@ public class SwitchEngine implements SwitchInitiator, SwitchSuppressionHandler.O
     }
 
     private void cancelTasks(final SwitchJob job) {
+        final ClientResources owner = this.jobOwners.remove(job);
+        if (owner != null) owner.jobs.remove(job);
         this.inFlightTargetJobs.remove(job); //no terminal/abort path skips this funnel
         this.cancelScheduledTasks(job);
     }

@@ -19,7 +19,7 @@ public final class LobbyTransfers {
     public record Pending(String host, int port) {
     }
 
-    private static final ConcurrentHashMap<UUID, Pending> PENDING = new ConcurrentHashMap<>();
+    private static final PendingMessages<Pending> PENDING = new PendingMessages<>();
 
     private LobbyTransfers() {
     }
@@ -29,7 +29,11 @@ public final class LobbyTransfers {
      * pending one.
      */
     public static void post(final UUID player, final String host, final int port) {
-        PENDING.put(player, new Pending(host, port));
+        post(player, host, port, null);
+    }
+
+    public static Runnable post(final UUID player, final String host, final int port, final io.netty.channel.Channel connection) {
+        return PENDING.post(player, new Pending(host, port), connection);
     }
 
     /**
@@ -37,7 +41,11 @@ public final class LobbyTransfers {
      */
     @Nullable
     public static Pending consume(final UUID player) {
-        return PENDING.remove(player);
+        return PENDING.consume(player);
+    }
+
+    public static Pending consume(final UUID player, final io.netty.channel.Channel connection) {
+        return connection == null ? PENDING.consume(player) : PENDING.consume(player, connection);
     }
 
     /**

@@ -99,6 +99,7 @@ public final class DefaultIdentityLinkService implements IdentityLinkService {
     @Override
     public CompletionStage<Result> link(final PlayerSession session, @Nullable final CPAccount verifiedAccount) {
         final CompletableFuture<Result> result = new CompletableFuture<>();
+        try {
         this.executor.execute(() -> {
             try {
                 result.complete(this.linkBlocking(session, verifiedAccount));
@@ -107,6 +108,7 @@ public final class DefaultIdentityLinkService implements IdentityLinkService {
                 result.complete(Result.FAILED);
             }
         });
+        } catch (java.util.concurrent.RejectedExecutionException busy) { result.complete(Result.FAILED); }
         return result;
     }
 
@@ -451,6 +453,7 @@ public final class DefaultIdentityLinkService implements IdentityLinkService {
     @Override
     public CompletionStage<Result> unlink(final PlayerSession session) {
         final CompletableFuture<Result> result = new CompletableFuture<>();
+        try {
         this.executor.execute(() -> {
             try {
                 result.complete(this.unlinkBlocking(session));
@@ -459,6 +462,7 @@ public final class DefaultIdentityLinkService implements IdentityLinkService {
                 result.complete(Result.FAILED);
             }
         });
+        } catch (java.util.concurrent.RejectedExecutionException busy) { result.complete(Result.FAILED); }
         return result;
     }
 

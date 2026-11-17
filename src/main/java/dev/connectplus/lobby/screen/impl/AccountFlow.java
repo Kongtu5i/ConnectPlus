@@ -42,6 +42,10 @@ import javax.annotation.Nullable;
  */
 public final class AccountFlow {
 
+    private static final dev.connectplus.resources.AccountTasks TASKS = new dev.connectplus.resources.AccountTasks(16);
+    public static void enableTasks() { TASKS.enable(); }
+    public static void shutdownTasks() { TASKS.shutdown(); }
+
     private AccountFlow() {
     }
 
@@ -125,7 +129,7 @@ public final class AccountFlow {
         sendChatLines(screenHandler, Languages.text(lang, Messages.MainScreen.Login.ChatLoading));
         final io.netty.channel.Channel channel = screenHandler.getStateHandler().getChannel();
 
-        final Thread thread = new Thread(() -> {
+        if (!TASKS.start(channel, "ConnectPlus-Login", () -> {
             try {
                 final CPAccount account = CpAccounts.loginViaDeviceCode(code -> {
                     final String uri = code.verificationUri();
@@ -165,11 +169,13 @@ public final class AccountFlow {
                     if (finishLogin(session, channel)) screenHandler.openScreen(new MainScreen(lang));
                 });
             }
-        }, "ConnectPlus-Login");
-        thread.setDaemon(true);
-        thread.start();
+        })) {
+            if (finishLogin(session, channel)) {
+                sendChatLines(screenHandler, Languages.text(lang, Messages.Commands.AccountBusy));
+                screenHandler.openScreen(new MainScreen(lang));
+            }
+        }
 
-        channel.closeFuture().addListener(future -> thread.interrupt());
     }
 
     /** A completed attempt on an old lobby channel must not unlock a new attempt after a switch. */
@@ -405,7 +411,7 @@ public final class AccountFlow {
                 () -> sendChatLines(screenHandler, Languages.text(lang, Messages.MainScreen.Login.ChatLoading)),
                 lang);
 
-        final Thread thread = new Thread(() -> {
+        if (!TASKS.start(channel, "ConnectPlus-Link", () -> {
             CPAccount account = null;
             Throwable failure = null;
             try {
@@ -462,11 +468,13 @@ public final class AccountFlow {
                     if (finishLogin(session, channel)) screenHandler.openScreen(new MainScreen(lang));
                 });
             }
-        }, "ConnectPlus-Link");
-        thread.setDaemon(true);
-        thread.start();
+        })) {
+            if (finishLogin(session, channel)) {
+                sendChatLines(screenHandler, Languages.text(lang, Messages.Commands.AccountBusy));
+                screenHandler.openScreen(new MainScreen(lang));
+            }
+        }
 
-        channel.closeFuture().addListener(future -> thread.interrupt());
     }
 
     /** Same ownership check as {@link #finishLogin} without unlocking the login flag (the link unlock is separate). */
@@ -533,7 +541,7 @@ public final class AccountFlow {
             screenHandler.getStateHandler().send(new S2CSystemChatPacket(component, false));
         }
         final dev.connectplus.identity.IdentityLinkService linkService = handler.getLinkService();
-        final Thread thread = new Thread(() -> {
+        if (!TASKS.start(channel, "ConnectPlus-Unlink", () -> {
             dev.connectplus.identity.IdentityLinkService.Result result;
             try {
                 result = linkService.unlink(session).toCompletableFuture()
@@ -562,10 +570,12 @@ public final class AccountFlow {
                     }
                 }
             });
-        }, "ConnectPlus-Unlink");
-        thread.setDaemon(true);
-        thread.start();
-        channel.closeFuture().addListener(future -> thread.interrupt());
+        })) {
+            if (finishLogin(session, channel)) {
+                sendChatLines(screenHandler, Languages.text(lang, Messages.Commands.AccountBusy));
+                screenHandler.openScreen(new MainScreen(lang));
+            }
+        }
     }
 
     /**

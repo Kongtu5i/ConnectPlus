@@ -17,6 +17,20 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AccessServiceTest {
+    @Test void committedRulesStillNotifyWhenTheNotificationQueueIsFull() {
+        var reject = new java.util.concurrent.atomic.AtomicBoolean();
+        var observed = new AtomicInteger();
+        var service = new AccessService(new AccessListStore(whitelistFile()), new AccessListStore(blacklistFile()),
+                new AccessService.ConfiguredFlags(false,false), action -> {
+                    if (reject.get()) throw new java.util.concurrent.RejectedExecutionException("full");
+                    action.run();
+                });
+        service.initialize().toCompletableFuture().join();
+        service.subscribe(state -> observed.incrementAndGet());
+        int before = observed.get(); reject.set(true);
+        service.setPendingInheritanceNow(Set.of(AccessKey.javaUuid(JAVA_UUID)));
+        assertEquals(before + 1, observed.get(), "A committed access change must always trigger the online recheck");
+    }
 
     @Test
     void concurrentSwitchAndPendingUpdatesNeverOverwriteEachOther() throws Exception {

@@ -102,6 +102,8 @@ public class PlayerSession {
     public transient PlayerData observedAccountData;
     public transient SessionLease observedAccountLease;
     public transient Runnable accountChangeUnsubscribe;
+    /** At most one pending/retrying credential snapshot per connection. */
+    public transient Runnable pendingAccountSave;
 
     /**
      * The persisted per-player data (bookmarks + encrypted account blob).

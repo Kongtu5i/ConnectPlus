@@ -32,6 +32,69 @@ import static org.junit.jupiter.api.Assertions.*;
 class AccountRenewalTest {
     @TempDir File directory;
 
+    @Test void refreshedCredentialsRetryAfterAFullQueueWithoutAnotherChangeEvent() throws Exception {
+        try (var rig = new Rig(true)) {
+            var rejected = new java.util.concurrent.atomic.AtomicBoolean();
+            var forwarding = new java.util.concurrent.AbstractExecutorService() {
+                public void execute(Runnable action) {
+                    if (rejected.compareAndSet(false,true)) throw new java.util.concurrent.RejectedExecutionException("full");
+                    rig.storage.execute(action);
+                }
+                public void shutdown() { }
+                public java.util.List<Runnable> shutdownNow() { return java.util.List.of(); }
+                public boolean isShutdown() { return false; }
+                public boolean isTerminated() { return false; }
+                public boolean awaitTermination(long n,java.util.concurrent.TimeUnit u) { return false; }
+            };
+            var field = LobbyServerHandler.class.getDeclaredField("storageExecutor"); field.setAccessible(true);
+            field.set(rig.handler,forwarding);
+            rig.handler.watchAccountChanges(rig.handler.getSession());
+            rig.account.json = "{\"token\":\"rotated-after-full-queue\"}";
+            rig.account.changed();
+            var client = (EmbeddedChannel)rig.handler.getSession().c2pChannel;
+            client.advanceTimeBy(2,java.util.concurrent.TimeUnit.SECONDS); client.runScheduledPendingTasks();
+            rig.settle();
+            assertEquals(rig.account.toJson(),rig.persistedJson());
+        }
+    }
+
+    @Test
+    void changingAccountsDoesNotAccumulateDisconnectListeners() throws Exception {
+        try (var rig = new Rig(true)) {
+            var channel = rig.handler.getSession().c2pChannel;
+            rig.handler.watchAccountChanges(rig.handler.getSession());
+            int before = listeners(channel.closeFuture());
+            for (int i=0;i<100;i++) {
+                rig.handler.getSession().account = new MutableAccount();
+                rig.handler.watchAccountChanges(rig.handler.getSession());
+            }
+            assertEquals(before, listeners(channel.closeFuture()));
+        }
+    }
+    private static int listeners(Object future) throws Exception {
+        Class<?> type = future.getClass();
+        while (type != null) {
+            try {
+                var field = type.getDeclaredField("listeners"); field.setAccessible(true);
+                Object value = field.get(future); if (value == null) return 0;
+                try { var size = value.getClass().getDeclaredField("size"); size.setAccessible(true); return (int)size.get(value); }
+                catch (NoSuchFieldException single) { return 1; }
+            } catch (NoSuchFieldException next) { type = type.getSuperclass(); }
+        }
+        throw new NoSuchFieldException("listeners");
+    }
+
+    @Test
+    void rejectedRefreshDoesNotLeaveTheAccountPermanentlyBusy() throws Exception {
+        try (var rig = new Rig(true)) {
+            rig.storage.shutdownNow();
+            rig.account.expired = true;
+            assertDoesNotThrow(rig::start);
+            assertFalse(rig.handler.isAccountRefreshing());
+            assertSame(rig.account, rig.handler.getSession().account);
+        }
+    }
+
     @Test
     void expiredLiveAccountRefreshesOffTheEventLoopAndPersists() throws Exception {
         try (var rig = new Rig(true)) {

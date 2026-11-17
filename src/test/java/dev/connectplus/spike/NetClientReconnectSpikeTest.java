@@ -71,13 +71,15 @@ class NetClientReconnectSpikeTest {
         client.connect(serverA).syncUninterruptibly();
         client.getChannel().writeAndFlush(Unpooled.wrappedBuffer("ping".getBytes(StandardCharsets.UTF_8))).syncUninterruptibly();
         final Object first = received.poll(5, TimeUnit.SECONDS);
-        assertEquals("ping", ((ByteBuf) first).toString(StandardCharsets.UTF_8));
+        try { assertEquals("ping", ((ByteBuf) first).toString(StandardCharsets.UTF_8)); }
+        finally { io.netty.util.ReferenceCountUtil.release(first); }
 
         client.getChannel().close().syncUninterruptibly();
         CompatChannelSwapper.reconnect(client, serverB).syncUninterruptibly();
 
         client.getChannel().writeAndFlush(Unpooled.wrappedBuffer("ping2".getBytes(StandardCharsets.UTF_8))).syncUninterruptibly();
         final Object second = received.poll(5, TimeUnit.SECONDS);
-        assertEquals("ping2", ((ByteBuf) second).toString(StandardCharsets.UTF_8));
+        try { assertEquals("ping2", ((ByteBuf) second).toString(StandardCharsets.UTF_8)); }
+        finally { io.netty.util.ReferenceCountUtil.release(second); client.getChannel().close().syncUninterruptibly(); }
     }
 }

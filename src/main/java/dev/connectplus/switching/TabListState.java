@@ -18,8 +18,8 @@ import java.util.UUID;
 
 /** Client-visible player entries. Accessed only on the client channel's event loop. */
 final class TabListState {
-    private final Set<UUID> players = new LinkedHashSet<>();
-    private final Set<String> legacyNames = new LinkedHashSet<>();
+    private final Set<UUID> players = new BoundedStateSet<>(65536, 4 * 1024 * 1024, value -> 64);
+    private final Set<String> legacyNames = new BoundedStateSet<>(65536, 4 * 1024 * 1024, value -> 64L + value.length() * 2L);
     private static final int MAX_ENTRIES = 65536;
 
     static boolean supports(int version) { return version <= 777 && WorldReset.supports(version); }

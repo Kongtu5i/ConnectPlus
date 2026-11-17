@@ -476,6 +476,7 @@ public class Messages {
         public static final Msg SwitchUnavailable = new Msg("Commands.SwitchUnavailable", "§cThis connection cannot be switched right now. Please reconnect through the proxy.");
         public static final Msg SwitchAccessPending = new Msg("Commands.SwitchAccessPending", "§cConnectPlus cannot connect you right now (access check pending or denied).");
         public static final Msg SwitchUnsupportedProtocol = new Msg("Commands.SwitchUnsupportedProtocol", "§cYour client version is not supported for server switching yet. Please ask the administrator to update ConnectPlus.");
+        public static final Msg AccountBusy = new Msg("Commands.AccountBusy", "§6Account services are busy. Please try again shortly.");
         public static final Msg SwitchBusy = new Msg("Commands.SwitchBusy", "§cA server switch is already in progress, please wait a moment.");
         public static final Msg ConnectRateLimited = new Msg("Commands.ConnectRateLimited", "§cToo many connect attempts, please wait a moment.");
         public static final Msg KickedByServer = new Msg("Commands.KickedByServer", "§cYou were kicked from {0}: {1} - sending you back to the lobby.");
@@ -866,6 +867,7 @@ public class Messages {
             public static String SwitchUnavailable = "§c当前连接无法热切换，请通过代理重新连接。";
             public static String SwitchAccessPending = "§c当前暂时无法连接：名单检查未完成或被拒绝。";
             public static String SwitchUnsupportedProtocol = "§c当前客户端版本暂不支持切服，请联系管理员更新 ConnectPlus。";
+            public static String AccountBusy = "§6账号服务繁忙，请稍后重试。";
             public static String SwitchBusy = "§c正在进行服务器切换，请稍候。";
             public static String ConnectRateLimited = "§c连接尝试过于频繁，请稍候再试。";
             public static String KickedByServer = "§c你被 {0} 踢出: {1} - 正在将你送回大厅。";

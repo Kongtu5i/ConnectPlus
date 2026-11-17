@@ -85,7 +85,7 @@ public final class LobbyConstants {
     private static <T> T readCompound(final String name, final Function<CompoundTag, T> mapper) {
         final InputStream stream = LobbyConstants.class.getClassLoader().getResourceAsStream(name);
         if (stream == null) throw new IllegalStateException("Missing resource: " + name);
-        try {
+        try (stream) {
             return mapper.apply(NbtIO.LATEST.read(stream, true, NbtReadTracker.unlimitedDepth()).asCompoundTag());
         } catch (final Exception e) {
             throw new IllegalStateException("Failed to read resource: " + name, e);
@@ -95,7 +95,7 @@ public final class LobbyConstants {
     private static List<String> readItems(final String name) {
         final InputStream stream = LobbyConstants.class.getClassLoader().getResourceAsStream(name);
         if (stream == null) throw new IllegalStateException("Missing resource: " + name);
-        try {
+        try (stream) {
             final JsonArray array = JsonParser.parseReader(new InputStreamReader(stream, StandardCharsets.UTF_8)).getAsJsonArray();
             final List<String> items = new ArrayList<>(array.size());
             for (int i = 0; i < array.size(); i++) {

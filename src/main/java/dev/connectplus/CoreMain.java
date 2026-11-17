@@ -91,6 +91,7 @@ public class CoreMain extends ViaProxyPlugin {
     @Override
     public void onEnable() {
         instance = this;
+        dev.connectplus.lobby.screen.impl.AccountFlow.enableTasks();
         ViaProxyCompat.init(this);
 
         final File dataFolder = ViaProxyCompat.dataFolder();
@@ -131,11 +132,7 @@ public class CoreMain extends ViaProxyPlugin {
         // disk work for the lists runs on the storage executor; the startup load
         // already decides availability — an enabled list without valid data stays
         // in the rejecting LIST_UNAVAILABLE state until a successful reload.
-        this.storageExecutor = java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
-            final Thread thread = new Thread(runnable, "ConnectPlus-Storage");
-            thread.setDaemon(true);
-            return thread;
-        });
+        this.storageExecutor = dev.connectplus.resources.ResourceExecutors.single("ConnectPlus-Storage");
         this.accessService = new dev.connectplus.access.AccessService(
                 new dev.connectplus.access.AccessListStore(new File(dataFolder, "whitelist.json").toPath()),
                 new dev.connectplus.access.AccessListStore(new File(dataFolder, "blacklist.json").toPath()),
@@ -202,7 +199,7 @@ public class CoreMain extends ViaProxyPlugin {
                 // The coordinator receives the endpoint supplier so displacements can
                 // reach managed bedrock clients through the targeted DISCONNECT op (task 4).
                 this.lobbyServer = new LobbyServer(new SessionRegistry(), tokenStore, playerStore, this.switchEngine,
-                        () -> this.bedrockBridgeEndpoint);
+                        () -> this.bedrockBridgeEndpoint, true, this.proxyVisitStore);
                 // §4.1: complete the binding transaction recovery BEFORE the lobby
                 // starts accepting connections (profile loading opens for the affected
                 // identities only after the recovery resolved every journal entry).
@@ -241,6 +238,7 @@ public class CoreMain extends ViaProxyPlugin {
                 logger().info("Lobby server listening on {}", this.lobbyServer.localAddress());
             } catch (final LobbyBindException e) {
                 logger().error("Lobby server could not be started, lobby features are disabled", e);
+                if (this.lobbyServer != null) this.lobbyServer.stop();
                 this.lobbyServer = null;
             }
         }
@@ -248,11 +246,7 @@ public class CoreMain extends ViaProxyPlugin {
         // Console command entry (both modes): the official event only matches the
         // cp/connectplus roots; queries run on the plugin's own executor so the
         // console thread never blocks on store IO.
-        this.consoleExecutor = java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
-            final Thread thread = new Thread(runnable, "ConnectPlus-Console");
-            thread.setDaemon(true);
-            return thread;
-        });
+        this.consoleExecutor = dev.connectplus.resources.ResourceExecutors.single("ConnectPlus-Console");
         // The access console shares the storage executor for its disk reads; the
         // mutation port is the binding coordinator's change() (task 6): both
         // currently linked accounts in one list commit.
@@ -300,6 +294,10 @@ public class CoreMain extends ViaProxyPlugin {
             ViaProxyCompat.unregisterListener(listener);
         }
         this.listeners.clear();
+        dev.connectplus.lobby.screen.impl.AccountFlow.shutdownTasks();
+        if (this.switchEngine != null) { this.switchEngine.shutdown(); this.switchEngine = null; }
+        dev.connectplus.lobby.LobbyNotices.consumeAll();
+        dev.connectplus.lobby.LobbyTransfers.consumeAll();
         if (this.lobbyServer != null) {
             this.lobbyServer.stop();
             this.lobbyServer = null;

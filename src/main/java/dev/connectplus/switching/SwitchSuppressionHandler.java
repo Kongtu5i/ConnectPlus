@@ -93,6 +93,8 @@ public class SwitchSuppressionHandler extends PacketHandler {
          */
         void onForwardDeath(ProxyConnection pc, SwitchJob job);
 
+        default void onClientStateLimit(ProxyConnection pc, SwitchJob job) { onForwardDeath(pc, job); }
+
         /**
          * The target server sent a transfer packet while forwarding (M5 F7); the
          * engine applies the transfer policy (confirm/follow/ignore).
@@ -263,8 +265,9 @@ public class SwitchSuppressionHandler extends PacketHandler {
         }
         final int transactionId;
         final String input;
+        ByteBuf buf = null;
         try {
-            final ByteBuf buf = Unpooled.wrappedBuffer(unknownPacket.data);
+            buf = Unpooled.wrappedBuffer(unknownPacket.data);
             transactionId = PacketTypes.readVarInt(buf);
             input = PacketTypes.readString(buf, 256);
         } catch (final Exception e) {
@@ -272,7 +275,7 @@ public class SwitchSuppressionHandler extends PacketHandler {
             //mirroring readFirstString's defensive parsing of chat packets.
             DebugLog.log("Ignored a malformed command suggestion request: {}", e.toString());
             return true;
-        }
+        } finally { if (buf != null) buf.release(); }
         if (input == null) {
             return true;
         }
@@ -284,17 +287,19 @@ public class SwitchSuppressionHandler extends PacketHandler {
             }
         }
         final ByteBuf response = Unpooled.buffer();
-        PacketTypes.writeVarInt(response, transactionId);
-        PacketTypes.writeVarInt(response, 0); //start of the replaced range (the input including its slash)
-        PacketTypes.writeVarInt(response, input.length()); //length of the replaced range
-        PacketTypes.writeVarInt(response, suggestions.size());
-        for (final String suggestion : suggestions) {
-            PacketTypes.writeString(response, suggestion);
-            response.writeBoolean(false); //per-entry no-tooltip marker
-        }
-        this.proxyConnection.getC2P().writeAndFlush(
-                new UnknownPacket(MCPackets.S2C_COMMAND_SUGGESTIONS.getId(this.proxyConnection.getClientVersion().getVersion()),
-                        ByteBufUtil.getBytes(response)));
+        try {
+            PacketTypes.writeVarInt(response, transactionId);
+            PacketTypes.writeVarInt(response, 0); //start of the replaced range (the input including its slash)
+            PacketTypes.writeVarInt(response, input.length()); //length of the replaced range
+            PacketTypes.writeVarInt(response, suggestions.size());
+            for (final String suggestion : suggestions) {
+                PacketTypes.writeString(response, suggestion);
+                response.writeBoolean(false); //per-entry no-tooltip marker
+            }
+            this.proxyConnection.getC2P().writeAndFlush(
+                    new UnknownPacket(MCPackets.S2C_COMMAND_SUGGESTIONS.getId(this.proxyConnection.getClientVersion().getVersion()),
+                            ByteBufUtil.getBytes(response)));
+        } finally { response.release(); }
         return true;
     }
 
@@ -377,12 +382,13 @@ public class SwitchSuppressionHandler extends PacketHandler {
 
     @Nullable
     private String readFirstString(final UnknownPacket packet) {
+        ByteBuf buf = null;
         try {
-            final ByteBuf buf = Unpooled.wrappedBuffer(packet.data);
+            buf = Unpooled.wrappedBuffer(packet.data);
             return PacketTypes.readString(buf, 256);
         } catch (final Exception e) {
             return null;
-        }
+        } finally { if (buf != null) buf.release(); }
     }
 
     /** Changes only the payload passed through the documented packet-handler API. */
@@ -704,6 +710,20 @@ public class SwitchSuppressionHandler extends PacketHandler {
                 } else {
                     this.waypoints.observe(raw);
                 }
+            } catch (StateLimitException limit) {
+                // Do not let an abusive backend keep growing state behind the proxy.
+                if (job != null && !job.target().lobby()) {
+                    this.pauseFrontendReads();
+                    if (this.currentJob.compareAndSet(job, null)) {
+                        this.deathHandled.set(true);
+                        final Channel backend = this.proxyConnection.getChannel();
+                        if (backend != null) backend.close();
+                        this.owner.onClientStateLimit(this.proxyConnection, job);
+                    }
+                } else {
+                    this.proxyConnection.getC2P().close();
+                }
+                return;
             } catch (RuntimeException e) {
                 // A malformed/unknown body remains native client traffic. Never
                 // invent an ID, partially mutate the tracker or alter its packet.

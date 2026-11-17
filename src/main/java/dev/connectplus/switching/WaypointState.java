@@ -15,7 +15,8 @@ import java.util.UUID;
 /** Client-visible locator markers, confined to the client channel's event loop. */
 final class WaypointState {
     private record Source(UUID uuid, String name) { }
-    private final Set<Source> sources = new LinkedHashSet<>();
+    private final Set<Source> sources = new BoundedStateSet<>(4096, 1024 * 1024,
+            value -> 96L + (value.name() == null ? 0 : value.name().length() * 2L));
 
     private static boolean supports(int version) {
         return switch (version) {

@@ -60,6 +60,35 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
  */
 class SwitchSuppressionHandlerTest {
 
+    @Test
+    void stateOverflowStopsForwardingAndPausesFrontendBeforeRecovery() {
+        final SwitchJob job = beginJob(false);
+        job.markForward();
+        this.pc.setP2sConnectionState(ConnectionState.PLAY);
+        for (int i=0;i<4096;i++) {
+            assertFalse(this.suppression.handleP2S(dev.connectplus.testutil.ScoreboardPackets.objective(769,"hp"+i,0),new ArrayList<>()));
+            assertNotNull(this.c2p.readOutbound());
+        }
+        assertFalse(this.suppression.handleP2S(dev.connectplus.testutil.ScoreboardPackets.objective(769,"overflow",0),new ArrayList<>()));
+        assertNoOutbound(this.c2p);
+        assertFalse(this.c2p.config().isAutoRead());
+        assertTrue(this.c2p.isActive());
+        assertFalse(this.p2s.isActive());
+        assertEquals(1,this.owner.forwardDeaths.size());
+    }
+
+    @Test
+    void repeatedSuggestionsReleaseTemporaryHeapBuffers() {
+        final UnknownPacket request = suggestionRequest(7, "/d");
+        final var metric = io.netty.buffer.UnpooledByteBufAllocator.DEFAULT.metric();
+        final long before = metric.usedHeapMemory();
+        for (int i = 0; i < 100; i++) {
+            assertFalse(this.suppression.handleC2P(request, new ArrayList<>()));
+            assertNotNull(this.c2p.readOutbound());
+        }
+        assertEquals(before, metric.usedHeapMemory());
+    }
+
     private static final ProtocolVersion CLIENT_VERSION = ProtocolVersion.v1_21_4;
     private static final int SKIN_TEST_PROTOCOL = 777;
 

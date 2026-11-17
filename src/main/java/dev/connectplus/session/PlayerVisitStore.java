@@ -95,6 +95,11 @@ public class PlayerVisitStore {
     private static final class State {
         final Map<String, VisitEntry> visits = new LinkedHashMap<>();
         final Map<String, String> knownJavaNames = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        private Snapshot snapshot;
+        synchronized Snapshot snapshot() {
+            if (snapshot == null) snapshot = new Snapshot(new ArrayList<>(visits.values()), knownJavaNames);
+            return snapshot;
+        }
     }
 
     /** The immutable query view of the committed index state. */
@@ -181,7 +186,7 @@ public class PlayerVisitStore {
     /** The current committed snapshot. Blocking IO on first use only. */
     public Snapshot snapshot() {
         final State current = this.load();
-        return new Snapshot(List.copyOf(current.visits.values()), current.knownJavaNames);
+        return current.snapshot();
     }
 
     private State load() {
@@ -377,7 +382,9 @@ public class PlayerVisitStore {
         Objects.requireNonNull(javaUuid, "javaUuid");
         Objects.requireNonNull(name, "name");
         synchronized (this.lock) {
-            final State next = copyOf(this.load());
+            final State current = this.load();
+            if (name.equals(current.knownJavaNames.get(javaUuid.toString()))) return;
+            final State next = copyOf(current);
             next.knownJavaNames.put(javaUuid.toString(), name);
             this.commit(next);
         }

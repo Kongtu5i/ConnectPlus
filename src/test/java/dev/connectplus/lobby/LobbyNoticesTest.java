@@ -16,6 +16,22 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class LobbyNoticesTest {
+    @Test
+    void bareDiagnosticsKeepLegacyLookupButKnownConnectionsCannotTakeAnotherOwnersNotice() {
+        final UUID player = UUID.randomUUID();
+        final EmbeddedChannel owner = new EmbeddedChannel(), stranger = new EmbeddedChannel();
+        try {
+            LobbyNotices.post(player,List.of(LobbyNotices.Notice.raw("diagnostic")),owner);
+            assertNull(LobbyNotices.consume(player,stranger));
+            assertEquals("diagnostic",LobbyNotices.consume(player,null).get(0).raw());
+            LobbyTransfers.post(player,"example.invalid",25565,owner);
+            assertNull(LobbyTransfers.consume(player,stranger));
+            assertEquals("example.invalid",LobbyTransfers.consume(player,null).host());
+        } finally {
+            owner.finishAndReleaseAll(); stranger.finishAndReleaseAll();
+            LobbyNotices.consumeAll(); LobbyTransfers.consumeAll();
+        }
+    }
 
     @Test
     void noticeResolvesTemplateByLanguage() {

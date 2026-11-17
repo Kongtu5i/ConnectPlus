@@ -99,6 +99,7 @@ public final class ConsoleCommandService {
      */
     public CompletionStage<List<String>> execute(final ConsoleCommands.Command command) {
         final CompletableFuture<List<String>> result = new CompletableFuture<>();
+        try {
         this.executor.execute(() -> {
             try {
                 result.complete(this.run(command));
@@ -106,6 +107,9 @@ public final class ConsoleCommandService {
                 result.complete(List.of(consoleText(Console.CommandFailed, e.getClass().getSimpleName() + (e.getMessage() == null ? "" : " - " + e.getMessage()))));
             }
         });
+        } catch (java.util.concurrent.RejectedExecutionException busy) {
+            result.complete(List.of(consoleText(Console.CommandFailed, "Services are busy; try again shortly")));
+        }
         return result;
     }
 

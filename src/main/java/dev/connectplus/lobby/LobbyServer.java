@@ -51,11 +51,7 @@ public class LobbyServer {
      * the transaction's persistence steps all run here, its exclusivity comes
      * from the coordinator's claim).
      */
-    private final ExecutorService storageExecutor = Executors.newSingleThreadExecutor(runnable -> {
-        final Thread thread = new Thread(runnable, "ConnectPlus-Storage");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ExecutorService storageExecutor = dev.connectplus.resources.ResourceExecutors.single("ConnectPlus-LobbyStorage");
     private final AtomicInteger uncaughtExceptions = new AtomicInteger();
     private final ChannelInitializer<Channel> channelInitializer;
     private NetServer netServer;
@@ -84,13 +80,19 @@ public class LobbyServer {
     public LobbyServer(final SessionRegistry sessionRegistry, final TokenStore tokenStore, final PlayerStore playerStore,
                        final SwitchInitiator switchInitiator, final Supplier<BedrockBridgeEndpoint> bridgeEndpoint,
                        final boolean withLinkService) {
+        this(sessionRegistry, tokenStore, playerStore, switchInitiator, bridgeEndpoint, withLinkService, null);
+    }
+
+    public LobbyServer(final SessionRegistry sessionRegistry, final TokenStore tokenStore, final PlayerStore playerStore,
+                       final SwitchInitiator switchInitiator, final Supplier<BedrockBridgeEndpoint> bridgeEndpoint,
+                       final boolean withLinkService, final PlayerVisitStore sharedVisits) {
         this.sessionRegistry = sessionRegistry;
         this.playerStore = playerStore;
         //The link index shares the players directory with the profiles (plan layout).
         this.identityLinkStore = new IdentityLinkStore(playerStore.playersDir());
         //The visit index lives in the CP data directory itself, deliberately
         //separate from the profile/token/link-transaction files.
-        this.visitStore = new PlayerVisitStore(
+        this.visitStore = sharedVisits != null ? sharedVisits : new PlayerVisitStore(
                 new java.io.File(playerStore.playersDir().getParentFile(), "visits-index.json"));
         this.coordinator = new AccountSessionCoordinator(playerStore, bridgeEndpoint);
         this.leaseGranter = this.coordinator;
@@ -202,6 +204,7 @@ public class LobbyServer {
         try {
             server.bind(new InetSocketAddress("127.0.0.1", port), false);
         } catch (final Throwable t) {
+            this.stop();
             throw new LobbyBindException(port, t);
         }
         this.netServer = server;

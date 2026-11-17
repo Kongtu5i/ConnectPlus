@@ -10,6 +10,27 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConnectRateLimiterTest {
+    @Test void parallelAttemptsCannotExceedTheWindowLimit() throws Exception {
+        var limiter = new ConnectRateLimiter(3);
+        var workers = java.util.concurrent.Executors.newFixedThreadPool(8);
+        UUID id = UUID.randomUUID();
+        try {
+            var work = new java.util.ArrayList<java.util.concurrent.Callable<Boolean>>();
+            for (int i=0;i<100;i++) work.add(() -> limiter.tryAcquire(id));
+            int allowed = 0;
+            for (var result : workers.invokeAll(work)) if (result.get()) allowed++;
+            assertEquals(3, allowed);
+        } finally { workers.shutdownNow(); }
+    }
+
+    @Test void maintenanceRemovesPlayersWhoNeverReturn() throws Exception {
+        var limiter = new ConnectRateLimiter(3);
+        long now = System.nanoTime();
+        for (int i=0;i<100;i++) limiter.tryAcquireAt(UUID.randomUUID(),now,java.util.List.of());
+        limiter.pruneAt(now + TimeUnit.SECONDS.toNanos(61));
+        var entries = ConnectRateLimiter.class.getDeclaredField("attempts"); entries.setAccessible(true);
+        assertEquals(0, ((java.util.Map<?,?>)entries.get(limiter)).size());
+    }
 
     @Test
     void allowsUpToLimit() {

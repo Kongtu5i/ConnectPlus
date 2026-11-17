@@ -179,23 +179,15 @@ public final class AccessService {
             newState = update.apply(this.state);
             this.state = newState;
         }
-        // Notify outside the state critical section, including direct test executors.
-        try {
-            this.executor.execute(() -> {
-                for (final Consumer<AccessPolicy.State> subscriber : this.subscribers) {
-                    try {
-                        subscriber.accept(newState);
-                    } catch (final RuntimeException ignored) {
-                        // One broken subscriber never breaks the publication.
-                    }
-                }
-            });
-        } catch (final java.util.concurrent.RejectedExecutionException stopping) {
-            // The committed state remains authoritative even during executor shutdown.
-            // In particular, pending inheritance must never escape as a precommit abort.
-            org.slf4j.LoggerFactory.getLogger("ConnectPlus-Access")
-                    .warn("Access state committed while notification executor was stopping");
-        }
+        // Subscribers schedule channel rechecks, not disk IO. Never lose a committed rule update.
+        final Runnable notify = () -> {
+            for (final Consumer<AccessPolicy.State> subscriber : this.subscribers) {
+                try { subscriber.accept(newState); }
+                catch (final RuntimeException ignored) { /* one observer cannot prevent the others */ }
+            }
+        };
+        try { this.executor.execute(notify); }
+        catch (final java.util.concurrent.RejectedExecutionException busy) { notify.run(); }
         return newState;
     }
 

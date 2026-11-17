@@ -27,6 +27,10 @@ final class ClientConfiguration {
     private final Supplier<SwitchJob> current;
     private final BiConsumer<SwitchJob, String> failure;
     private static final int MAX_BYTES = 32 * 1024 * 1024, MAX_PACKETS = 4096;
+    private static final java.util.concurrent.atomic.AtomicLong GLOBAL_BYTES = new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicInteger GLOBAL_PACKETS = new java.util.concurrent.atomic.AtomicInteger();
+    private static final long GLOBAL_MAX_BYTES = 128L * 1024 * 1024;
+    private static final int GLOBAL_MAX_PACKETS = 65536;
     private static final class Buffered {
         final Packet packet;
         final int size;
@@ -109,7 +113,8 @@ final class ClientConfiguration {
         if (packet instanceof UnknownPacket raw) {
             if (raw.data == null) throw new IllegalArgumentException("Missing configuration payload");
             if (!reserve(job, raw.data.length)) return;
-            entry = new Buffered(new UnknownPacket(raw.packetId, raw.data.clone()), raw.data.length);
+            try { entry = new Buffered(new UnknownPacket(raw.packetId, raw.data.clone()), raw.data.length); }
+            catch (Throwable error) { returnReservation(raw.data.length); throw error; }
         } else {
             //Bound even the temporary typed encoding, then reserve before copying/scheduling.
             final ByteBuf encoded = Unpooled.buffer(256, MAX_BYTES);
@@ -120,8 +125,10 @@ final class ClientConfiguration {
                 registry.setConnectionState(ConnectionState.CONFIGURATION);
                 final int id = registry.getPacketId(packet);
                 if (!reserve(job, size)) return;
-                entry = new Buffered(packet instanceof S2CConfigFinishConfigurationPacket
-                        ? new S2CConfigFinishConfigurationPacket() : new UnknownPacket(id, ByteBufUtil.getBytes(encoded)), size);
+                try {
+                    entry = new Buffered(packet instanceof S2CConfigFinishConfigurationPacket
+                            ? new S2CConfigFinishConfigurationPacket() : new UnknownPacket(id, ByteBufUtil.getBytes(encoded)), size);
+                } catch (Throwable error) { returnReservation(size); throw error; }
             } finally { encoded.release(); }
         }
         final Runnable delivery = () -> {
@@ -140,7 +147,13 @@ final class ClientConfiguration {
     private boolean reserve(SwitchJob job, int size) {
         synchronized (budgetLock) {
             if (reservedPackets < MAX_PACKETS && size <= MAX_BYTES - reservedBytes) {
-                reservedPackets++; reservedBytes += size; return true;
+                // Lock both counters together: tiny/empty packets also consume a finite global budget.
+                synchronized (GLOBAL_BYTES) {
+                    if (size <= GLOBAL_MAX_BYTES - GLOBAL_BYTES.get() && GLOBAL_PACKETS.get() < GLOBAL_MAX_PACKETS) {
+                        GLOBAL_BYTES.addAndGet(size); GLOBAL_PACKETS.incrementAndGet();
+                        reservedPackets++; reservedBytes += size; return true;
+                    }
+                }
             }
         }
         failure.accept(job, "Target configuration exceeds CP buffer limit");
@@ -151,7 +164,14 @@ final class ClientConfiguration {
         synchronized (budgetLock) {
             if (entry.released) return;
             entry.released = true;
-            reservedPackets--; reservedBytes -= entry.size;
+            returnReservation(entry.size);
+        }
+    }
+
+    private void returnReservation(int size) {
+        synchronized (budgetLock) {
+            reservedPackets--; reservedBytes -= size;
+            synchronized (GLOBAL_BYTES) { GLOBAL_BYTES.addAndGet(-size); GLOBAL_PACKETS.decrementAndGet(); }
         }
     }
 
